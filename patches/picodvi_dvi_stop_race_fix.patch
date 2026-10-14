@@ -1,0 +1,48 @@
+diff --git a/software/libdvi/dvi.c b/software/libdvi/dvi.c
+index f520374..c43b089 100644
+--- a/software/libdvi/dvi.c
++++ b/software/libdvi/dvi.c
+@@ -156,6 +156,8 @@ void dvi_stop(struct dvi_inst *inst) {
+ 	if (!inst->dvi_started) {
+ 		return;
+ 	}
++	//実行中のIRQハンドラが安全に抜けられるよう、チャンネルを止める前に停止状態にする
++	inst->dvi_started = false;
+ 	uint mask = 0;
+ 	for (int i = 0; i < N_TMDS_LANES; ++i) {
+ 		dma_channel_config cfg = dma_channel_get_default_config(inst->dma_cfg[i].chan_ctrl);
+@@ -170,7 +172,6 @@ void dvi_stop(struct dvi_inst *inst) {
+ 	dma_hw->ints0 = 1u << inst->dma_cfg[TMDS_SYNC_LANE].chan_data;
+ 
+ 	dvi_serialiser_enable(&inst->ser_cfg, false);
+-	inst->dvi_started = false;
+ }
+ 
+ static inline void __dvi_func_x(_dvi_prepare_scanline_8bpp)(struct dvi_inst *inst, uint32_t *scanbuf) {
+@@ -237,8 +238,10 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
+ 	// active period). On RP2040, tcr is the live decrementing counter -- the
+ 	// change to dbg_tcr is a required RP2350 fix.
+ 	for (int i = 0; i < N_TMDS_LANES; ++i) {
+-		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing_derived.tmds_words_per_channel)
++		while (dma_debug_hw->ch[inst->dma_cfg[i].chan_data].dbg_tcr != inst->timing_derived.tmds_words_per_channel) {
++			if (!inst->dvi_started) return; // dvi_stopでチャンネルが止まったとき無限待ちしない
+ 			tight_loop_contents();
++		}
+ 	}
+ 
+ 	uint32_t *tmdsbuf = NULL;
+@@ -334,12 +337,14 @@ static void __dvi_func(dvi_dma_irq_handler)(struct dvi_inst *inst) {
+ static void __dvi_func(dvi_dma0_irq)() {
+ 	struct dvi_inst *inst = dma_irq_privdata[0];
+ 	dma_hw->ints0 = 1u << inst->dma_cfg[TMDS_SYNC_LANE].chan_data;
++	if (!inst->dvi_started) return; // 停止中/切替中に残った割り込みは無視する
+ 	dvi_dma_irq_handler(inst);
+ }
+ 
+ static void __dvi_func(dvi_dma1_irq)() {
+ 	struct dvi_inst *inst = dma_irq_privdata[1];
+ 	dma_hw->ints1 = 1u << inst->dma_cfg[TMDS_SYNC_LANE].chan_data;
++	if (!inst->dvi_started) return;
+ 	dvi_dma_irq_handler(inst);
+ }
+ 
