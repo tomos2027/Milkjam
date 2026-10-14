@@ -3,6 +3,8 @@
 IchigoJam BASIC 1.6.1 (NTSCコンポジット出力 + 4K版) をベースにした **Raspberry Pi Pico W (無線対応)** 版です。
 WiFi接続・センサー・ThingsBoard送信・OLED表示を1枚のPico Wに統合した、IoTスターターキット向けBASICです。
 
+📖 **使い方の詳細は [MANUAL_JA.md](MANUAL_JA.md) (マニュアル) を参照してください**
+
 ## ハードウェア
 - **Raspberry Pi Pico W** (RP2040 + CYW43439 WiFi)
 - Pico W では **GPIO 23/24/25/29 が内蔵WiFiチップ (CYW43) の接続に使用される**ため、他の用途には使えません (基板LEDもWiFiチップ経由。GP2のLEDマップはそのまま使用可能)

@@ -3,6 +3,8 @@
 An **Raspberry Pi Pico W (wireless)** version based on IchigoJam BASIC 1.6.1 (NTSC composite output + 4K edition).
 A BASIC for IoT starter kits that integrates WiFi, sensors, ThingsBoard telemetry and OLED display on a single Pico W.
 
+📖 **See [MANUAL.md](MANUAL.md) for detailed usage instructions**
+
 ## Hardware
 - **Raspberry Pi Pico W** (RP2040 + CYW43439 WiFi)
 - On Pico W, **GPIO 23/24/25/29 are used by the on-board WiFi chip (CYW43)** and are not available for other purposes (the on-board LED is driven via the WiFi chip; the GP2 LED mapping still works)
