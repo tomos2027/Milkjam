@@ -6,10 +6,17 @@
 #define CHAR_MAX_ROWS 24
 struct dvi_inst dvi0;
 
-//ビデオ出力モード 0:DVI(HDMI) 1:NTSC(コンポジット)、SWITCHコマンドで切り替える
+//ビデオ出力モード 0:DVI(HDMI)、1:NTSC(コンポジット)、2:TFT(ILI9341)、SWITCHコマンドで切り替える
 #define VIDEO_MODE_DVI 0
 #define VIDEO_MODE_NTSC 1
+#define VIDEO_MODE_TFT 2
 uint8_t video_output_mode = VIDEO_MODE_DVI;
+
+//TFT液晶 (GP12-16) はDVI (HDMI、GP12-19) とピンを共用するため排他で使用する:
+//LCDONコマンドで1にするとHDMI (SWITCH 0) への切替を禁止し、
+//LCDOFFコマンドで0にするとLCD (SWITCH 2) への切替を禁止する (安全のため、flashに保存)
+//NTSC (GP3) は排他ピンではないため常に切替可能
+uint8_t lcd_enabled = 0;
 
 void video_switch_mode(uint8_t mode);//init.hで定義
 void ntsc_init();//init.hで定義
@@ -26,6 +33,8 @@ void video_on() {
         //開始するときは毎回チェーンを再初期化して位相を合わせ直す
         ntsc_release();
         ntsc_init();
+    } else if (video_output_mode == VIDEO_MODE_TFT) {
+        tft_resume();//video_offからの再開 (初回の開始はvideo_switch_mode/video_output_initが行う)
     } else {
         dvi_start(&dvi0);
     }
@@ -35,6 +44,8 @@ void video_on() {
 void video_off(int clkdiv) {
     if (video_output_mode == VIDEO_MODE_NTSC) {
         stop_composite();
+    } else if (video_output_mode == VIDEO_MODE_TFT) {
+        tft_stop();
     } else {
         dvi_stop(&dvi0);
     }
@@ -43,12 +54,14 @@ void video_off(int clkdiv) {
 static inline int video_active() {
     if (video_output_mode == VIDEO_MODE_NTSC) {
         return ntsc_active();
+    } else if (video_output_mode == VIDEO_MODE_TFT) {
+        return tft_active();
     }
     return dvi0.dvi_started;
 }
 
 void video_waitSync(uint num) {
-    //NTSCモードでは1フレームごとにdrawcountが増えるのを待つ (DVIモードでは何もしない)
+    //NTSC/TFTモードでは1フレームごとのカウンタ増加を待つ (DVIモードでは何もしない)
     if (video_output_mode == VIDEO_MODE_NTSC) {
         for (uint i = 0; i < num; i++) {
             uint16_t count = drawcount;
@@ -56,6 +69,17 @@ void video_waitSync(uint num) {
             while (drawcount == count) {
                 if (time_us_64() - start > 100000) {
                     return;//100msで諦める (映像停止中などに起動が固まるのを防ぐ)
+                }
+                __wfi();
+            }
+        }
+    } else if (video_output_mode == VIDEO_MODE_TFT) {
+        for (uint i = 0; i < num; i++) {
+            uint16_t count = frames;
+            uint64_t start = time_us_64();
+            while (frames == count) {
+                if (time_us_64() - start > 100000) {
+                    return;
                 }
                 __wfi();
             }

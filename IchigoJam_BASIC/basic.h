@@ -69,7 +69,10 @@ S_INLINE int IJB_i2c(uint8 writemode, uint16* param); // -1:ad error 1:ok 0:i2c 
 S_INLINE int IJB_peek(int ad);
 S_INLINE void IJB_poke(int ad, int n);
 S_INLINE int IJB_usr(int ad, int n);
-S_INLINE void IJB_lcd(uint mode); // 1.2b32
+S_INLINE void IJB_lcd(uint mode, int flip); // 1.2b32 (SWITCH n[,flip]: flip=TFT180°回転)
+S_INLINE int video_next_mode(); // SWITCH (引数なし) のトグル先モード (LCDON/LCDOFF排他を考慮、init.hで定義)
+S_INLINE void IJB_lcdon(); // LCDON: LCD(TFT)モードへ切替+HDMI排他ロック (init.hで定義)
+S_INLINE void IJB_lcdoff(); // LCDOFF: LCD排他ロック解除+HDMI(DVI)モードへ切替 (init.hで定義)
 #ifndef NO_KBD_COMMAND
 S_INLINE void IJB_kbd(uint mode); // 1.5b1
 #ifdef VERSION15
@@ -116,7 +119,7 @@ static void iot_out2(int ad, int len, int flash);
 
 #endif
 
-S_INLINE void ws_out(int port, int nled, int reapeat);
+static void ws_out(int port, int nled, int reapeat);
 
 // util -----------------------------------------------------
 
@@ -365,6 +368,11 @@ static void command_load(int mode);
 S_INLINE void command_save();
 S_INLINE int i2c_eeprom_exists(); // 外部EEPROMの有無 (あり:1 なし:0、4K版)
 S_INLINE void command_files();
+// SDカード (SDON/SDOFF、SAVE/LOAD 200-299、アスキー形式)
+static void command_sd(int enable);
+static void sd_print_read_error(void); // SD読み取り診断表示
+static int sd_build_text_program(uint8_t *dst, unsigned capacity); // プログラム→アスキーテキスト
+static bool sd_import_text_program(const char *text, int len); // アスキーテキスト→LIST取込み
 S_INLINE void command_led();
 S_INLINE void command_out();
 S_INLINE void command_pwm();
@@ -586,6 +594,8 @@ int basic_execute(char* commandline) {
 			case TOKEN_FILES:	command_files();						break;
 			//100
 
+		case TOKEN_SDON:	command_sd(1);							break;
+		case TOKEN_SDOFF:	command_sd(0);							break;
 
 			case TOKEN_SLEEP:	command_sleep();						break;
 			case TOKEN_RESET:	command_reset();						return BASIC_RESULT_EDIT; // break; // for wasm 容量増加?
@@ -628,6 +638,8 @@ int basic_execute(char* commandline) {
 			case TOKEN_ENV_IN:	command_env_in();							break; // 4K版 (GivetakeJam_P準拠)
 			case TOKEN_EJ:		command_ej();								break; // IOTPADコマンド (Pico W)
 			case TOKEN_PAD_IN:	command_pad_in();							break; // IOTPADセンサー一括読み取り (Pico W)
+			case TOKEN_LCDON:	IJB_lcdon();								break; // LCDON: LCD(TFT)モードへ切替+HDMI排他ロック
+			case TOKEN_LCDOFF:	IJB_lcdoff();								break; // LCDOFF: LCD排他ロック解除+HDMI(DVI)モードへ切替
 			default:
 				#ifdef USE_EXTENSION
 				if (extension_command(token.code)) {
@@ -898,6 +910,13 @@ static Token token_get()
 		}
 		const uint8* ptoken = TOKENS;
 		uint8 c2 = 0;
+		//最長一致: LOCATE省略形"LC"がLCDON/LCDOFFの接頭辞になっているため、
+		//最初の一致ではなく最長の一致を採用する
+		//(演算子 (==,&&,<<等) はテーブル内で長い順に配置済みのため既存入力の動作は不変。
+		//  同長の一致は表の前方のエントリを優先する)
+		int best_code = 0;
+		uint8 best_len = 0;
+		char* best_pc = 0;
 		for (int i = 0; i < max; i++) {
 			uint8 len = *ptoken;
 			int hit = 1;
@@ -922,13 +941,18 @@ static Token token_get()
 //				}
 //				pc++;
 			}
-			if (hit) {
-				Token_code = i + N_TOKEN_OFFSET;
-//				Token_return(token);
-				goto RET;
+			if (hit && len > best_len) {//hit時のpcは一致テキストの直後を指している
+				best_code = i + N_TOKEN_OFFSET;
+				best_len = len;
+				best_pc = pc;
 			}
 			ptoken += len;
 			pc = lasttoken;
+		}
+		if (best_code) {
+			Token_code = best_code;
+			pc = best_pc;
+			goto RET;
 		}
 		// var
 //		pc = lasttoken;
@@ -2610,11 +2634,49 @@ void command_load(int command) {
 	token_end();
 	IJB_ERR_CHK();
 
-	memclear4((uint8*)list, IJB_SIZEOF_LIST);
-	_g.listsize = 0;
-	pc = pcbreak = NULL;
+	int16 s;
+	bool sd_text = false;
+	if (n >= 200 && n <= 299) {
+		// SDから一時領域へ読んで検査する。成功するまで現在のプログラムを消さない。
+		s = sd_prepare_program(n); // Pnnn.IJB (バイナリ)
+		if (s < 0 && sd_file_error == 30) {
+			// .IJBがなければテキスト形式 Pnnn.BAS を試す (アスキー)
+			s = sd_prepare_text_program(n);
+			if (s >= 0) sd_text = true;
+		}
+		if (s < 0) {
+			if (sd_read_error) sd_print_read_error();
+			else { put_str("SD file error "); put_num(sd_file_error); put_chr('\n'); }
+			command_error(ERR_FILE_ERROR);
+			return;
+		}
+		memclear4((uint8*)list, IJB_SIZEOF_LIST);
+		_g.listsize = 0;
+		pc = pcbreak = NULL;
+#ifdef TOKEN_CACHE
+		lasttokenpc = NULL;
+#endif
+		if (sd_text) {
+			if (!sd_import_text_program((const char*)sd_file_data, s)) {
+				memclear4((uint8*)list, IJB_SIZEOF_LIST);
+				_g.listsize = 0;
+				pc = pcbreak = NULL;
+				put_str("SD text error\n");
+				command_error(ERR_FILE_ERROR);
+				return;
+			}
+			pc = pcbreak = NULL;
+		} else {
+			memcpy((uint8*)list, sd_file_data, s);
+		}
+		_g.lastfile = n;
+	} else {
+		memclear4((uint8*)list, IJB_SIZEOF_LIST);
+		_g.listsize = 0;
+		pc = pcbreak = NULL;
 
-	int16 s = IJB_load(n, (uint8*)list, IJB_SIZEOF_LIST - 2, 1);
+		s = IJB_load(n, (uint8*)list, IJB_SIZEOF_LIST - 2, 1);
+	}
 //	int16 s = IJB_load(n, list, IJB_SIZEOF_LIST);
 	if (s >= 0) {
 		// 読み込み時にサイズ算出している
@@ -2668,18 +2730,65 @@ S_INLINE void command_save() {
 		n = token_expression();
 		IJB_ERR_CHK();
 	}
+	// ASCII形式オプション (SDスロット200-299専用): SAVE n,1=テキスト(.BAS)、省略/0=バイナリ(.IJB)
+	int16 ascii = 0;
+	code = token_getCode();
+	if (code == TOKEN_COMMA) {
+		ascii = token_expression();
+		IJB_ERR_CHK();
+	} else {
+		token_back();
+	}
 	token_end();
 	IJB_ERR_CHK();
 
-	if (!IJB_save(n, (uint8*)list, _g.listsize)) {
-		if (!noresmode) {
-			//		_printf("Saved %dbyte\n", _g.listsize);
-			put_str("Saved ");
-			put_num(_g.listsize);
-			put_str("byte\n");
+	if (n >= 200 && n <= 299) {
+		// SD保存番号はSD処理へ、それ以外は従来のFlash/EEPROM処理へ渡す。
+		int result;
+		if (ascii == 0) {
+			result = sd_save_program(n, (const uint8_t*)list, (unsigned)_g.listsize, false) ? 0 : 1;
+		} else if (ascii == 1) {
+			static uint8_t sd_text[4096]; // アスキーテキスト化バッファ
+			int size = sd_build_text_program(sd_text, sizeof(sd_text));
+			if (size < 0) {
+				put_str("SD file error 38\n"); // テキスト化で4096バイトを超えた
+				command_error(ERR_FILE_ERROR);
+				return;
+			}
+			result = sd_save_program(n, sd_text, (unsigned)size, true) ? 0 : 1;
+		} else {
+			command_error(ERR_SYNTAX_ERROR);
+			return;
 		}
+		if (result) {
+			if (sd_write_error) {
+				put_str("SD write error "); put_num(sd_write_error);
+				put_str(" R1="); put_num(sd_write_r1);
+				put_str(" RESPONSE="); put_num(sd_write_response); put_chr('\n');
+			} else {
+				put_str("SD file error "); put_num(sd_file_error); put_chr('\n');
+			}
+			if (sd_save_committed) put_str("File committed; cleanup failed\n");
+			else if (sd_save_commit_started) put_str("Directory update uncertain\n");
+			command_error(ERR_FILE_ERROR);
+			return;
+		}
+		_g.lastfile = n;
 	} else {
-		command_error(ERR_FILE_ERROR);
+		if (ascii) { // ASCII形式オプションはSDスロット専用
+			command_error(ERR_SYNTAX_ERROR);
+			return;
+		}
+		if (IJB_save(n, (uint8*)list, _g.listsize)) {
+			command_error(ERR_FILE_ERROR);
+			return;
+		}
+	}
+	if (!noresmode) {
+		//		_printf("Saved %dbyte\n", _g.listsize);
+		put_str("Saved ");
+		put_num(_g.listsize);
+		put_str("byte\n");
 	}
 }
 /*
@@ -2707,21 +2816,129 @@ int16 bk_startn_files = 0;
 int16 bk_endn_files = 0;
 #endif
 
+// ===== SDカード (Canon-boy4氏 GivetakeJam_P rp2350-16130準拠) =====
+
+// SD一覧は保存済み番号だけ表示し、BASICプログラムと直前のファイル番号は変えない。
+static int sd_files_print_row(int number) {
+	char preview[SCREEN_W];
+	int status = sd_files_preview(number, preview, sizeof(preview));
+	if (status < 0) { put_str("SD file error "); put_num(sd_file_error); put_chr('\n'); command_error(ERR_FILE_ERROR); return -1; }
+	if (!status) return 0;
+	int width = put_num(number); put_chr(' ');
+	if (status == 2) put_str("[empty]");
+	else if (status == 3) put_str("[invalid]");
+	else {
+		int limit = SCREEN_W - 3 - width; if (limit < 0) limit = 0;
+		preview[limit] = 0; put_str(preview);
+	}
+	put_chr('\n'); return 1;
+}
+// プログラム (LIST内部形式) をアスキーテキスト "行番号 本文"CRLF に変換する。容量超過時は-1。
+// 出力はUTF-8 (半角カナ 0xA1-0xDF → 3バイトのU+FF61-FF9F)。PCのモダンエディタでそのまま閲覧できる。
+static int sd_build_text_program(uint8_t *dst, unsigned capacity) {
+	unsigned pos = 0;
+	int index = 0;
+	for (;;) {
+		int num = list_getNumber(index);
+		if (num == 0) break;
+		int len = list_getLength(index);
+		// 行番号を10進文字列へ
+		char numbuf[6];
+		int nl = 0;
+		{
+			int t = num;
+			char rev[6]; int rc = 0;
+			do { rev[rc++] = (char)('0' + t % 10); t /= 10; } while (t);
+			while (rc) numbuf[nl++] = rev[--rc];
+		}
+		if (pos + (unsigned)nl + 1 + 2 > capacity) return -1;
+		memcpy(dst + pos, numbuf, (unsigned)nl); pos += (unsigned)nl;
+		dst[pos++] = ' ';
+		// 本文 (NULまで)。半角カナはUTF-8の3バイトへ変換する
+		const char *text = list + index + 3;
+		unsigned tl = 0;
+		while (tl < (unsigned)len && text[tl]) tl++;
+		for (unsigned k = 0; k < tl; k++) {
+			uint8_t c = (uint8_t)text[k];
+			if (c >= 0xA1 && c <= 0xBF) { // 半角カナ ｡-ｿ → U+FF61-FF7F
+				if (pos + 3 > capacity) return -1;
+				dst[pos++] = 0xEF; dst[pos++] = 0xBD; dst[pos++] = c;
+			} else if (c >= 0xC0 && c <= 0xDF) { // 半角カナ ﾀ-ﾟ → U+FF80-FF9F
+				if (pos + 3 > capacity) return -1;
+				dst[pos++] = 0xEF; dst[pos++] = 0xBE; dst[pos++] = c - 0x40;
+			} else { // ASCII・PCG等はそのまま (PCG 0xE0-0xFFは往復で元に戻る)
+				if (pos + 1 > capacity) return -1;
+				dst[pos++] = c;
+			}
+		}
+		dst[pos++] = '\r';
+		dst[pos++] = '\n';
+		index += len + 4;
+	}
+	return (int)pos;
+}
+// アスキーテキストを1行ずつcommand_editでLISTへ取り込む (打ち込んだのと同じ経路)。
+// 1行は "行番号 本文" 形式。行番号は1-32767、降順なしはエラー扱い。
+static bool sd_import_text_program(const char *text, int len) {
+	static char line[300]; // command_editはpc-1/pc-2を読むため、行番号込みの一時バッファを使う
+	int pos = 0;
+	while (pos < len) {
+		while (pos < len && (text[pos] == '\r' || text[pos] == '\n' || text[pos] == ' ')) pos++;
+		if (pos >= len) break;
+		// 行番号
+		int num = 0; bool hasnum = false;
+		while (pos < len && text[pos] >= '0' && text[pos] <= '9') {
+			num = num * 10 + (text[pos] - '0'); pos++; hasnum = true;
+		}
+		if (!hasnum || num <= 0 || num > 32767 || pos >= len || text[pos] != ' ') return false;
+		// バッファへ "行番号 本文" を組み立て (pc-1=' '、pc-2=行番号末尾の数字になる)
+		int lp = 0;
+		{
+			int t = num; char rev[6]; int rc = 0;
+			do { rev[rc++] = (char)('0' + t % 10); t /= 10; } while (t);
+			while (rc) line[lp++] = rev[--rc];
+		}
+		line[lp++] = ' ';
+		pos++; // 行番号の後のスペースを読み飛ばす
+		while (pos < len && text[pos] != '\r' && text[pos] != '\n') {
+			if (lp >= 296) return false; // 1行が長すぎ
+			line[lp++] = text[pos++];
+		}
+		line[lp] = 0;
+		// pcを本文の先頭へ (スペースの直後)
+		pc = line;
+		while (*pc != ' ') pc++;
+		pc++;
+		command_edit(num);
+		if (_g.err) return false;
+	}
+	return true;
+}
+
 S_INLINE void command_files() {
 	#ifdef IJB_DONT_LOOP
 	continue_files = 0;
 	#endif
 
-	int16 endn = N_FLASH_STORAGE - 1; // default Flash only
-	int16 startn = 0;
+	/*
+	 * FILES/FILES0：SDON中はSD200～299。SDOFF中は従来のFlash/EEPROM一覧。
+	 * 内蔵スロット数はN_FLASH_STORAGEに従う。番号/範囲の明示指定は従来どおり。
+	 */
+	int16 endn = sd_initialized ? 299 : N_FLASH_STORAGE - 1; // default: SDON中はSD一覧
+	int16 startn = sd_initialized ? 200 : 0;
 	if (token_getChar()) {
+		startn = 0; // 明示した単独番号/範囲は従来の意味を維持する
 		endn = token_expression();
 		IJB_ERR_CHK();
 		Token t; Token_get(t);
 		if (t.code != TOKEN_COMMA) {
 			token_back();
 			if (endn == 0) { // ver 1.2.4 FILES0
-				if (i2c_eeprom_exists()) {
+				/* FILES0：SDON中はSD一覧、SDOFF中は応答するEEPROMも含める */
+				if (sd_initialized) {
+					startn = 200;
+					endn = 299;
+				} else if (i2c_eeprom_exists()) {
 					endn = 100 + 32 - 1; // 外部EEPROMの表示範囲は100..131固定 (4K版、スロット数32はstorage.hのEEPROM_SIZEと同じ)
 				} else {
 					endn = N_FLASH_STORAGE - 1; // 外部EEPROMなし: 内蔵flashのみ
@@ -2736,6 +2953,15 @@ S_INLINE void command_files() {
 	token_end();
 	IJB_ERR_CHK();
 
+	if (startn <= endn && endn >= 200 && startn <= 299) {
+		// SD一覧のためにルートを1回走査する
+		if (!sd_files_build_index()) {
+			put_str("SD file error "); put_num(sd_file_error); put_chr('\n');
+			command_error(ERR_FILE_ERROR);
+			return;
+		}
+	}
+
 //	int max = endn;
 	if (endn >= 100) {
 		if (!i2c0_init()) { // ?いる?
@@ -2748,32 +2974,41 @@ S_INLINE void command_files() {
 //	int wcnt = 0;
 	int16 buf[16];
 	for (int i = startn; i <= endn; i++) {
+		/* 内蔵Flashの末尾からEEPROM開始100までの未割当番号を飛ばす */
 		if (i >= N_FLASH_STORAGE && i < 100)
 			continue;
-		if (i >= 132) // 外部EEPROMの表示範囲は100..131固定 (4K版)
+		/* EEPROM100～131とSD200～299の間、およびSD末尾以降の未割当番号を飛ばす */
+		if (i >= 132 && (i < 200 || i > 299))
 			continue;
-
-		int res = IJB_load(i, (uint8*)buf, SCREEN_W/*32*/, 0);
-		/*
-		if (res < 0) { // 1.4.2b19
-			break;
-		}
-		*/
-		int b = put_num(i);
-		if (res == SCREEN_W/*32*/) { // && line > 0) {
-//		if (res > 5) { // ver 1.2 beta 35
-			int16 line = *buf;
-			if (line > 0) {
-				put_chr(' ');
-				char* p = (char*)buf;
-				uint8 len = p[2];
-				if (len > SCREEN_W/*32*/ - 3 - b)
-					len = SCREEN_W/*32*/ - 3 - b;
-				p[len + 3] = '\0';
-				put_str(p + 3);
+		if (i >= 200) {
+			int row = sd_files_print_row(i);
+			if (row < 0)
+				return;
+			if (!row)
+				continue;
+		} else {
+			int res = IJB_load(i, (uint8*)buf, SCREEN_W/*32*/, 0);
+			/*
+			if (res < 0) { // 1.4.2b19
+				break;
 			}
+			*/
+			int b = put_num(i);
+			if (res == SCREEN_W/*32*/) { // && line > 0) {
+//		if (res > 5) { // ver 1.2 beta 35
+				int16 line = *buf;
+				if (line > 0) {
+					put_chr(' ');
+					char* p = (char*)buf;
+					uint8 len = p[2];
+					if (len > SCREEN_W/*32*/ - 3 - b)
+						len = SCREEN_W/*32*/ - 3 - b;
+					p[len + 3] = '\0';
+					put_str(p + 3);
+				}
+			}
+			put_chr('\n');
 		}
-		put_chr('\n');
 		cnt++;
 //			wcnt = 0;
 		if (cnt >= SCREEN_H - 2) {
@@ -2820,7 +3055,7 @@ int command_files_next() {
 	for (int i = startn; i <= endn; i++) {
 		if (i >= N_FLASH_STORAGE && i < 100)
 			continue;
-		if (i >= 132) // 外部EEPROMの表示範囲は100..131固定 (4K版)
+		if (i >= 132 && (i < 200 || i > 299)) // EEPROMとSDの間の未割当番号は飛ばす
 			continue;
 		int b = put_num(i);
 
@@ -3212,7 +3447,8 @@ S_INLINE void command_at() {
 }
 
 S_INLINE void command_lcd() { // 1.2b32, 1.3.2b12 contrast 292->248 +44byte
-	uint n = !_g.display_mode;
+	uint n = video_next_mode();//引数なし: DVI→NTSC→TFT→DVIの順でトグル (LCDON/LCDOFFの排他でブロック中のモードはスキップ)
+	int flip = -1;//-1: 省略 (180°回転設定は変更しない)、0: TFT通常向き、1: TFT180°回転
 	int code = token_getCode(); // ELSE対策 1.2b61
 	token_back();
 	if (code != TOKEN_NULL && code != TOKEN_ELSE) {
@@ -3223,12 +3459,12 @@ S_INLINE void command_lcd() { // 1.2b32, 1.3.2b12 contrast 292->248 +44byte
 		if (code != TOKEN_COMMA) {
 			token_back();
 		} else {
-			n += token_expression();
+			flip = token_expression();//SWITCH 2,1: TFT液晶を180°回転 (旧コードは第2引数をnに加算しモード番号が化けていた)
 			IJB_ERR_CHK();
 		}
 	}
 	token_end();
-	IJB_lcd(n);
+	IJB_lcd(n, flip);
 }
 
 S_INLINE void command_ok() { // 1.2b42 表示オフ追加、b53で OK0からOK2に変更
@@ -3492,9 +3728,14 @@ S_INLINE void command_iot_out() {
 #endif
 
 S_INLINE void command_ws_out() {
-	//WS.LED port,n[,repeat] ポート選択式 (4K版): port=1-7 (OUT1-6、7=LED/GP2)、n=LED数、色データは[0]〜
+	//WS.LED port,n[,repeat] ポート選択式 (4K版): port=1-7 (OUT1-6、7=LED/GP2)、n=LED数、色データは[0]〜、repeat=送信回数 (省略時1)
 	int port = token_expression();
 	IJB_ERR_CHK();
+	int code = token_getCode();
+	if (code != TOKEN_COMMA) {
+		command_error(ERR_SYNTAX_ERROR);
+		return;
+	}
 	int n = token_expression();
 	IJB_ERR_CHK();
 	int m = token_option1(1);
@@ -3990,6 +4231,46 @@ S_INLINE void command_dac() {
 }
 #endif
 #endif
+
+// ===== SDカード: SDON/SDOFF命令の実体 =====
+
+// BASICのput_numは小さい数値用なので、セクター番号などの32ビット値を別に表示する。
+static void sd_put_u32(uint32_t n) {
+	char digits[10]; unsigned count = 0;
+	do { digits[count++] = (char)('0' + n % 10u); n /= 10u; } while (n);
+	while (count) put_chr(digits[--count]);
+}
+// 読み取り失敗時のセクター番号・応答・CRC診断を表示する。
+static void sd_print_read_error(void) {
+	put_str("SD read error "); put_num(sd_read_error);
+	put_str(" LBA="); sd_put_u32(sd_read_lba);
+	put_str(" R1="); put_num(sd_read_r1);
+	put_str(" TOKEN="); put_num(sd_read_token); put_chr('\n');
+	if (sd_read_error == 15) {
+		put_str("CRC received="); sd_put_u32(sd_read_crc_wire);
+		put_str(" calculated="); sd_put_u32(sd_read_crc_calc); put_chr('\n');
+	}
+}
+// SDONはカード/FAT32の準備だけ行う。失敗時は原因番号を表示する。SDOFFはピンを解放する。
+static void command_sd(int enable) {
+	token_end(); if (_g.err) return;
+	if (!enable) { sd_card_off(); return; }
+	int result = sd_card_on();
+	if (result) {
+		put_str("SD init error "); put_num(result); put_chr('\n');
+		command_error(ERR_FILE_ERROR); return;
+	}
+	if (!sd_fat32_probe()) {
+		if (sd_read_error) sd_print_read_error();
+		else {
+			put_str("SD FS error "); put_num(sd_fs_error);
+			if (sd_fs_kind) { put_str(" FAT="); put_num(sd_fs_kind); }
+			put_chr('\n');
+		}
+		sd_card_off(); command_error(ERR_FILE_ERROR); return;
+	}
+	put_str("SD ready (FAT32, "); put_num(sd_read_hz / 1000); put_str("kHz)\n");
+}
 
 // __BASIC_H__
 #endif

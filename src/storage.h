@@ -1,12 +1,12 @@
 //picoに焼いたプログラムはフラッシュメモリの先頭に配置される
-//プログラム領域の終わりは、build/IchigoJam_P.elf.mapのflash_binary_endの下7桁を見ればわかるが、かなり余裕がある(2ブロックに収まっている)
+//プログラム領域の終わりは、build/milkjam.elf.mapのflash_binary_endの下7桁を見ればわかるが、かなり余裕がある
 //IchigoJamのプログラムはフラッシュメモリの後ろの方に保存する
-//フラッシュメモリの容量=2M=0x200000, 1ブロックの容量=0x10000, FLASH_SECTOR_SIZE=0x1000(単位はバイト)
+//Pico 2 Wのフラッシュ容量=4MB (PICO_FLASH_SIZE_BYTES)。1ブロックの容量=0x10000, FLASH_SECTOR_SIZE=0x1000(単位はバイト)
 #ifndef __STORAGE_H__
 #define __STORAGE_H__
 #include "all_includes.h"
 
-#define FLASH_IJ_OFFSET (0x200000 - FLASH_SECTOR_SIZE * 2)//SAVE0,LOAD0で操作するセクタの先頭(一番最後のセクタはKBDの設定値などを保存するのに使うので、その1つ前のセクタ)
+#define FLASH_IJ_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE * 2)//SAVE0,LOAD0で操作するセクタの先頭(一番最後のセクタはKBDの設定値などを保存するのに使うので、その1つ前のセクタ)
 #define EEPROM_OFFSET 100
 //4K版: 外部EEPROMのスロット数 (1スロット=4096バイト、32スロット=128KB、表示/保存範囲は100..131固定)
 #define EEPROM_SIZE 32

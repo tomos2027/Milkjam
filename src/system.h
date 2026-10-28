@@ -2,9 +2,10 @@
 #define __SYSTEM_H__
 #include "all_includes.h"
 
-//Pico W注意: GP23/24/25/29は内蔵WiFiチップ(CYW43)のSPIバス専用のため、GPIO操作禁止
+//Pico 2 W注意: GP23/24/25/29は内蔵WiFiチップ(CYW43)のSPIバス専用のため、GPIO操作禁止
 //基板LEDはCYW43経由(WL_GPIO0) — IOTPADのiotpad_led_set()で制御する (ext_wifi.h)
 void iotpad_led_set(int on); //ext_wifi.hで定義 (system.hより後ろでincludeされるため前方宣言)
+void sd_reconfig_spi(); //sd_card.hで定義 (クロック復帰後にSDのSPI速度を合わせ直す)
 
 //ウォッチドッグ: core0が固まったらこの秒数後に自動再起動する (電源抜き差しでハングした場合の自動復帰)
 //timer()内でwatchdog_update()を呼んで生きていることを伝える
@@ -29,9 +30,11 @@ void recover_from_sleep() {
 
     //rosc再開、クロック復元(clocks_init相当)、UART再設定
     sleep_power_up();
-    set_sys_clock_khz(video_output_mode == VIDEO_MODE_NTSC ? 157500 : DVI_TIMING.bit_clk_khz, true);
+    //クロックはビデオモード依存 (NTSC:157.5MHz、DVI/TFT:270MHz)
+    set_sys_clock_khz(video_output_mode == VIDEO_MODE_NTSC ? NTSC_CLOCK_KHZ : DVI_TIMING.bit_clk_khz, true);
     set_uart_bps();
     io_reconfig_pwm();//クロックが変わったのでPWMの分周比を再設定
+    sd_reconfig_spi();//SD使用中ならSPI1のbaudを新しいクロックに合わせ直す
     //スリープ中はtimer()が止まるためウォッチドッグを切ってあるので、ここで再有効化する
     watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
 }

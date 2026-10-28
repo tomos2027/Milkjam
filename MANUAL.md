@@ -1,34 +1,41 @@
 # Milkjam Manual
 
-User manual for Milkjam (based on IchigoJam BASIC 1.6.1 4K edition / Raspberry Pi Pico W).
+User manual for Milkjam (based on IchigoJam BASIC 1.6.1 4K edition / Raspberry Pi Pico 2 W).
 For setup instructions, see [README.md](README.md).
 
 ## Table of contents
 1. [Hardware](#1-hardware)
 2. [Boot sequence and diagnostics](#2-boot-sequence-and-diagnostics)
-3. [EJ command reference](#3-ej-command-reference)
-4. [PAD.IN — bulk sensor reading](#4-padin--bulk-sensor-reading)
-5. [EJ assignment form](#5-ej-assignment-form)
-6. [OLED screen reference](#6-oled-screen-reference)
-7. [ThingsBoard integration guide](#7-thingsboard-integration-guide)
-8. [BASIC program samples](#8-basic-program-samples)
-9. [Troubleshooting](#9-troubleshooting)
+3. [Display output — SWITCH / LCDON / LCDOFF](#3-display-output--switch--lcdon--lcdoff)
+4. [SD card — SDON / SDOFF](#4-sd-card--sdon--sdoff)
+5. [EJ command reference](#5-ej-command-reference)
+6. [PAD.IN — bulk sensor reading](#6-padin--bulk-sensor-reading)
+7. [EJ assignment form](#7-ej-assignment-form)
+8. [OLED screen reference](#8-oled-screen-reference)
+9. [ThingsBoard integration guide](#9-thingsboard-integration-guide)
+10. [BASIC program samples](#10-basic-program-samples)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
 ## 1. Hardware
 
-### Pin assignment (Raspberry Pi Pico W)
+### Pin assignment (Raspberry Pi Pico 2 W)
 
 | Function | GP | Notes |
 |---|---|---|
-| NTSC composite output | GP3 | Same as IchigoJam_P (video out via 75Ω+G circuit) |
+| **DVI (HDMI) output** | **GP12-19** | Pico DVI sock (SWITCH 0, 720x480p60) |
+| **TFT LCD ILI9341** | **GP12-16** | SCK=GP14, MOSI=GP15, CS=GP13, DC=GP16, RESET=GP12 (SWITCH 2, **exclusive with HDMI** → managed by LCDON/LCDOFF) |
+| NTSC composite output | GP3 | Same as IchigoJam_P (video out via 75Ω+560pF circuit) |
+| **SD card (FAT32)** | **GP6/8/10/11 + GP7** | CS=GP6, detect=GP7, MISO=GP8, CLK=GP10, MOSI=GP11 (time-shared with IN3/IN4/OUT1/OUT3/OUT4, toggle with SDON/SDOFF) |
 | I2C bus (sensors/OLED/RTC) | GP4 (SDA) / GP5 (SCL) | 3.3V, pull-ups required on module side |
 | External temp sensor DS18B20 | GP27 | Shared with IN1 input (toggle with `EJ "DS18B20",1`, needs 4.7kΩ pull-up) |
 | On-board LED | GP2 | Heartbeat (approx. 1Hz blink = running, approx. 8Hz = hardfault) |
-| **WiFi chip (CYW43) reserved** | **GP23/24/25/29** | **Not usable for other purposes** (Pico W hardware constraint) |
+| **WiFi chip (CYW43) reserved** | **GP23/24/25/29** | **Not usable for other purposes** (Pico 2 W hardware constraint) |
 | USB keyboard | Type-C port | USB host |
 | UART (diagnostics) | GP0 (TX) | 115200bps |
+
+WS.LED (WS2812B): ports 1-7 (OUT1-6 + LED/GP2). Driven by PIO so the display and USB keyboard are not disturbed. Blocked on shared pins (ports 1/3/4) while SDON.
 
 ### Supported sensors and I2C addresses
 
@@ -45,8 +52,10 @@ All sensors are optional. Detected at boot; `PW: xxx OK/FAIL` is printed on UART
 | DS18B20 ×2 | — (OneWire) | Ext temp 1 / 2 | GP27, waterproof probes, 4.7kΩ pull-up |
 
 ### Board-specific notes
-- The Pico W on-board LED (GP25) is driven via the WiFi chip; direct GPIO access is forbidden. Use the GP2 IchigoJam-compatible LED.
+- The Pico 2 W on-board LED (GP25) is driven via the WiFi chip; direct GPIO access is forbidden. Use the GP2 IchigoJam-compatible LED.
 - WiFi uses CYW43 firmware (~226KB flash) and ~28KB additional RAM.
+- The Pico 2 W has 4MB flash. The BASIC storage area (25 slots) and settings are placed at the end of flash.
+- GP26-28 can be used as ADC (ANA() command).
 
 ---
 
@@ -54,7 +63,7 @@ All sensors are optional. Detected at boot; `PW: xxx OK/FAIL` is printed on UART
 
 ### Boot sequence
 1. Title: `Milkjam 1.6.1 (IchigoJam BASIC by jig.jp)`
-2. WiFi init (`PW: cyw43 init OK` / takes 1-2s, NTSC display stays alive)
+2. WiFi init (`PW: cyw43 init OK` / takes 1-2s, display stays alive)
 3. Auto-connect if SSID is saved (NTP sync starts ~3s after connect, writes to RTC on success)
 4. Sensor/OLED init (`PW: BME280 OK` etc.), periodic reading every 1 second
 
@@ -81,7 +90,94 @@ All sensors are optional. Detected at boot; `PW: xxx OK/FAIL` is printed on UART
 
 ---
 
-## 3. EJ command reference
+## 3. Display output — SWITCH / LCDON / LCDOFF
+
+### Three display modes (`SWITCH`)
+
+| Command | Output | Connection | Clock |
+|---|---|---|---|
+| `SWITCH 0` | DVI (HDMI) 720x480p60 (TV-compatible 480p) | GP12-19 (Pico DVI sock) | 270MHz |
+| `SWITCH 1` | NTSC composite | GP3 (75Ω series + 560pF to GND) | 157.5MHz |
+| `SWITCH 2` | TFT LCD ILI9341 (SPI) | GP12-16 (**exclusive with HDMI**) | 270MHz |
+
+- `SWITCH` (no argument) — toggles to the next mode (DVI→NTSC→TFT→DVI; blocked modes are skipped)
+- `SWITCH 2,1` — rotates the TFT by 180° (`SWITCH 2,0` restores normal orientation)
+- The mode and rotation are **saved to flash** and restored on the next boot
+- In NTSC mode the CPU runs at 157.5MHz, so BASIC executes slower than in the 270MHz modes
+- The TFT uses differential updates; static screens do not touch the SPI bus (monochrome 2-color display, same as DVI)
+- **The TFT shares SPI1 with the SD card**: while SDON (during SD read/write) the display update pauses
+
+### HDMI/LCD pin exclusivity (`LCDON` / `LCDOFF`)
+
+The TFT LCD (GP12-16) **shares pins** with the DVI HDMI sock (GP12-19), so the two are used **exclusively**
+to avoid driving signals into the wrong peripheral. The lock state is saved to flash and survives reboot.
+
+| Command | Action |
+|---|---|
+| `LCDON` | **Enables the LCD** and switches to LCD (TFT) mode. `SWITCH 0` (HDMI) is **blocked** afterwards |
+| `LCDOFF` | **Disables the LCD** (switches to HDMI/DVI if in LCD mode). `SWITCH 2` (LCD) is **blocked** afterwards |
+
+- A blocked switch prints a message and does nothing (the program continues):
+  - `SWITCH 0` while LCDON → `HDMI disabled (LCDOFF to use)`
+  - `SWITCH 2` while LCDOFF → `LCD disabled (LCDON to use)`
+- **NTSC (GP3) is not a shared pin and can always be selected**
+- `LCDON`/`LCDOFF` while in NTSC mode changes only the lock state (use `SWITCH 2` afterwards to enter the LCD)
+
+### TFT LCD (ILI9341) wiring
+
+| TFT pin | GP | Pico 2 W physical pin |
+|---|---|---|
+| SCK | GP14 | pin 18 |
+| MOSI (SDA) | GP15 | pin 19 |
+| CS | GP13 | pin 16 |
+| DC | GP16 | pin 20 |
+| RESET | GP12 | pin 15 |
+| VCC / LEDA | 3.3V | 3V3 (OUT) |
+| GND | GND | GND |
+| SDO (MISO) | optional | — (write-only operation) |
+
+Note: GP12-16 overlap the HDMI sock pins. **Do not connect the LCD and an HDMI adapter at the same time**
+(simultaneous display is impossible by design; physically connecting only one of them is recommended).
+
+---
+
+## 4. SD card — SDON / SDOFF
+
+Programs can be saved to an FAT32 SD card (≤32GB recommended; reformat SDXC as FAT32) in slots 200-299.
+
+### Wiring (time-shared with IchigoJam I/O ports — as per IchigoJam-RP2040Zero/GivetakeJam_P)
+
+| SD module pin | GP | Shared I/O |
+|---|---|---|
+| DAT3 / CS | GP6 | IN3 |
+| DAT0 / MISO | GP8 | OUT1 |
+| CLK / SCK | GP10 | OUT3 |
+| CMD / MOSI | GP11 | OUT4 |
+| CD (card detect, LOW=inserted) | GP7 | IN4 (tie GP7 to GND if the module has no CD pin = always inserted) |
+
+- **While SDON, I/O commands on the shared pins (IN3/IN4/OUT1/OUT3/OUT4) are blocked** (`IN`/`OUT`/`PWM`/`WS.LED`/`IR.IN`)
+- `SDOFF` releases the card and restores the I/O pins
+- Polling driver: the DVI/NTSC/TFT display stays alive during SD access (TFT pauses updates only, since it shares SPI1)
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `SDON` | Card init + FAT32 mount → `SD ready (FAT32, 1000kHz)` |
+| `SDOFF` | Release the SD card (restore I/O pins) |
+| `SAVE 200` | P200.IJB (binary, BASIC internal format) |
+| `SAVE 200,1` | **P200.BAS (ASCII text, UTF-8)** — view/edit directly on a PC |
+| `LOAD 200` / `LRUN 200` | Prefers .IJB, falls back to .BAS automatically (LOAD reads without erasing the current program) |
+| `FILES` | Lists the SD card while SDON (200-299; explicit number/range keeps the legacy meaning) |
+
+- `.BAS` files are saved as **UTF-8** (one half-width kana = 3 bytes; watch the 4096-byte limit. **Kanji is not supported — use kana**)
+- LOAD auto-detects UTF-8 (half-width/full-width kana → half-width kana, full-width alphanumerics → ASCII, BOM aware) and legacy raw bytes
+- Reads are CRC-checked and writes are read-back verified. Failures print detailed `SD read/write error` information
+- Root directory only (no subfolders, 8.3 filenames)
+
+---
+
+## 5. EJ command reference
 
 **Basic form**: `EJ "CMD"[,"ARG"]` — quotes are optional (`EJ CMD` / `EJ CMD,ARG`). Responses are printed on screen.
 
@@ -149,7 +245,7 @@ All sensors are optional. Detected at boot; `PW: xxx OK/FAIL` is printed on UART
 
 ---
 
-## 4. PAD.IN — bulk sensor reading
+## 6. PAD.IN — bulk sensor reading
 
 ```
 PAD.IN [n]
@@ -172,7 +268,7 @@ Stores all sensor values and the RTC time into a **16-value array** (same style 
 
 Variables and expressions work for the array index: `PAD.IN [100+N]`. Range: [n+15] <= [357].
 
-## 5. EJ assignment form
+## 7. EJ assignment form
 
 Writing a **variable or array after `EJ`** assigns the numeric result silently (no quotes needed):
 
@@ -187,7 +283,7 @@ EJ SYNCTIME,A    → A=1 (synced) / 0
 - Without a target, the response is printed as usual
 - Scaling is identical to PAD.IN (0.1-unit series)
 
-## 6. OLED screen reference
+## 8. OLED screen reference
 
 Cycle through the 5 screens with `EJ "OLEDPAGE",n` / `EJ "NEXTSCR"`.
 
@@ -201,7 +297,7 @@ Cycle through the 5 screens with `EJ "OLEDPAGE",n` / `EJ "NEXTSCR"`.
 
 Top-right WiFi icon: connected = waves, disconnected = X. 5 fonts available (`EJ "OLEDFONT",0-4`, 8x13 default).
 
-## 7. ThingsBoard integration guide
+## 9. ThingsBoard integration guide
 
 1. Create a device in ThingsBoard and copy its **access token**
 2. Configure Milkjam:
@@ -218,7 +314,7 @@ EJ "SENDTB"          -> TB Code:200
 5. Auto-send: `EJ "SENDTB",60` (every 60s, survives reboot)
 6. **Offline queue**: sends while disconnected are queued automatically and flushed with their original `ts` when reconnected (max 8)
 
-## 8. BASIC program samples
+## 10. BASIC program samples
 
 ### Sensor logger (ThingsBoard every 60s)
 ```
@@ -245,11 +341,16 @@ EJ "SENDTB"          -> TB Code:200
 40 GOTO 10
 ```
 
-## 9. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Does not boot / no display | Reflash the UF2. Check the TV input. If flashed in DVI mode, switch with `SWITCH` (no `PW: cyw43 init OK` on UART = boot failure) |
+| Does not boot / no display | Reflash the UF2. Check the TV input. For HDMI check that the TV supports 480p. Switch modes with `SWITCH` (no `PW: cyw43 init OK` on UART = boot failure) |
+| Nothing on HDMI | Run `SWITCH 0`. The output is 720x480p60 (TV-compatible 480p) because some TVs reject 640x480 VGA. Check the DVI sock wiring (GP12-19) |
+| Nothing on the TFT | Run `LCDON` then `SWITCH 2` (blocked while LCD is disabled). Check the wiring (SCK=GP14/MOSI=GP15/CS=GP13/DC=GP16/RESET=GP12) and 3.3V power. If the screen stays white, lower `TFT_SPI_BAUD` in `src/tft.h` to 15.75MHz |
+| `HDMI disabled` / `LCD disabled` is printed | The HDMI/LCD pin exclusivity is active. Use `LCDOFF` to return to HDMI, or `LCDON` to use the LCD |
+| `SD init error` / `SD FS error` | Check card insertion and wiring (CS=GP6/MISO=GP8/CLK=GP10/MOSI=GP11/detect=GP7). **FAT32 required** (reformat SDXC/exFAT). Modules without a CD pin: tie GP7 to GND |
+| SD save fails | Check the `SD read/write error` details. Poor-quality cards automatically fall back to 100kHz. Avoid cards that fail the write verification |
 | WiFi does not connect | Reset SSID/password (`GETSSID`/`GETPWD` to verify). UART `link=-2`=SSID not found, `link=-3`=wrong password. 2.4GHz band only |
 | `Sync Failed` | NTP unreachable. Reconnect with `APC` then retry `SYNCTIME`. Check DNS on the router |
 | Time off by 9 hours | RTC stores **UTC, displays JST** by design. Update with `SYNCTIME` or set manually with `SETTIME` |

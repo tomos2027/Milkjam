@@ -2,16 +2,19 @@
 #define __IO_H__
 #include "all_includes.h"
 
+//Raspberry Pi Pico 2 W ピン割り当て (IchigoJam Pと同一のGPIO番号)
+//Pico 2 W注意: GP23/24/25/29は内蔵WiFiチップ (CYW43) のSPIバス専用のためGPIO操作禁止
+//GP6/7/8/10/11はSDカード (SPI1、SDON中) と共有 (OUT/PWM/WS.LED/IR.INがブロックされる)
 #define LED 2
-#define BTN 28
-#define IN1 27
-#define IN2 26
-#define IN3 6
-#define IN4 7
-#define OUT1 8
+#define BTN 28 // ADC2 (GNDとの間にボタンを接続、内部プルアップ)
+#define IN1 27 // ADC1
+#define IN2 26 // ADC0
+#define IN3 6  // SD CSと共有
+#define IN4 7  // SDカード検出と共有
+#define OUT1 8 // SD MISOと共有
 #define OUT2 9
-#define OUT3 10
-#define OUT4 11
+#define OUT3 10 // SD CLKと共有
+#define OUT4 11 // SD MOSIと共有
 #define OUT5 22
 #define OUT6 21
 
@@ -20,7 +23,7 @@
 #define PLEN_MAX 2000
 #define ANA_THRESHOLD (1024 / 4)
 
-//ラズパイの動作クロックはモードにより異なる (DVI:252MHz、NTSC:157.5MHz)
+//ラズパイの動作クロックはモードにより異なる (DVI/TFT:270MHz、NTSC:157.5MHz)
 //PWMのカウントクロックを常に1MHzにする (clkdiv = sysクロック/1MHz)
 //IchigoJamのPWMは1周期20msなので50Hz
 //https://rikei-tawamure.com/entry/2021/02/08/213335#PWM%E7%94%A8%E3%82%AB%E3%82%A6%E3%83%B3%E3%82%BF PWMの計算方法は左記参照
@@ -43,6 +46,9 @@ void IJB_pwm(int port, int plen, int len) {
         plen = PLEN_MAX;
     }
     uint8 pin = out_pins[port - 1];
+    if (sd_pin_reserved(pin)) {
+        return;//SD動作中の共有ピンはPWM化禁止
+    }
     gpio_set_function(pin, GPIO_FUNC_PWM);
     uint slice_num = pwm_gpio_to_slice_num(pin);
     pwm_set_clkdiv(slice_num, PWM_CLKDIV_MHZ());
@@ -84,11 +90,14 @@ void io_init() {
     adc_init();
     for (int i = 0; i < 4; i++) {
         uint8 pin = in_pins[i];
+        if (sd_pin_reserved(pin)) {
+            continue;//SD動作中の共有ピン (IN3/IN4) はスキップ
+        }
         gpio_init(pin);
         gpio_pull_up(pin);
     }
     for (int i = 1; i <= 6; i++) {
-        IJB_out(i, 0);
+        IJB_out(i, 0);//IJB_out内でsd_pin_reservedチェック
     }
     gpio_init(LED);
     gpio_set_dir(LED, GPIO_OUT);
@@ -144,6 +153,9 @@ int IJB_in() {
     int res = 0;
     for (int i = 0; i < IO_PIN_NUM; i++) {
         int pin = in_pins[i];
+        if (sd_pin_reserved(pin) || pin == SD_DETECT_PIN) {
+            continue;//SD動作中の共有ピンは読まない (意味のない値を返さない)
+        }
         bool bit = gpio_get(pin);
         res |= bit << i;
     }
@@ -156,10 +168,16 @@ void IJB_out(int port, int st) {
     }
     if (port == 0) {
         for (int i = 0; i < IO_PIN_NUM; i++) {
+            if (sd_pin_reserved(out_pins[i])) {
+                continue;//SD動作中の共有ピンはブロック
+            }
             gpio_put(out_pins[i], st & (1 << i));
         }
     } else {
         uint8 pin = out_pins[port - 1];
+        if (sd_pin_reserved(pin)) {
+            return;//SD動作中の共有ピン (OUT1/3/4) はブロック
+        }
         gpio_init(pin);
         if (st >= 0) {//OUT
             gpio_set_dir(pin, GPIO_OUT);
@@ -205,8 +223,8 @@ static int ir_port_to_gpio(int port) {
     switch (port) {
         case 1: return IN1;
         case 2: return IN2;
-        case 3: return IN3;
-        case 4: return IN4;
+        case 3: return sd_pin_reserved(IN3) ? -1 : IN3;//SD動作中は使用不可
+        case 4: return sd_pin_reserved(IN4) ? -1 : IN4;//SD動作中は使用不可
     }
     return -1;
 }

@@ -1,5 +1,5 @@
 #define IJB_PICO_NO_PRINT
-#define IJB_BUILD 0
+#define IJB_BUILD 30//RP2350版 (SDカード/HDMI/LCD対応): VER()=16130 (GivetakeJam_P rp2350-16130準拠)
 #define IJB_VER 161
 #include "all_includes.h"
 

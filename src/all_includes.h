@@ -21,6 +21,9 @@
 #include "hardware/clocks.h"
 #include "hardware/structs/scb.h"
 #include "hardware/i2c.h"
+// SDK定義の後、BASIC命令定義の前にSDドライバーを読み込む (SDON/SDOFF、SAVE/LOAD 200-299)
+// ※tft.hがsd_pins_reservedを参照するため、tft.hより前である必要がある
+#include "sd_card.h"
 
 //pico-extras
 #include "pico/sleep.h"
@@ -28,6 +31,7 @@
 
 //PicoDVI
 #include "dvi.h"
+#include "tmds_encode.h"
 #include "common_dvi_pin_configs.h"
 #include "sprite.h"
 
@@ -37,7 +41,8 @@
 #include "tusb.h"
 #include "hid.h"
 
-#define DVI_TIMING dvi_timing_640x480p_60hz
+//TV互換のCEA-861 720x480p60 (480p)。640x480p60 (VGA) はTVが認識しないことがある
+#define DVI_TIMING dvi_timing_720x480p_60hz
 
 // for IchigoJam BASIC
 #define NO_MEMCPY
@@ -56,10 +61,11 @@
 //---
 #include "i2c.h"
 #include "i2ceeprom.h"
+#include "tft.h"//TFT (ILI9341) ドライバ、display.hより先 (video_on/off/activeが参照するため)
+#include "display.h"//storage.h/keyboard.hがvideo_active等を使うため、それより先にincludeする
 #include "storage.h"
 #include "keyboard.h"
 #include "hid_app.c"
-#include "display.h"
 #include "io.h"
 #include "system.h"
 #include "sound.h"
