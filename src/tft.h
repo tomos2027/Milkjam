@@ -1,7 +1,7 @@
 //TFT液晶 (ILI9341) ドライバ — Milkjam (Raspberry Pi Pico 2 W)
 //接続ピン (GP12-16) はDVI (HDMI sock、GP12-19) と共用のため排他で使用する:
 //  LCDON中はSWITCH 0 (HDMI) への切替を禁止、LCDOFF中はSWITCH 2 (TFT) への切替を禁止 (SWITCHは排他を保証)
-//  SCK=GP14 (18番ピン)、MOSI=GP15 (19番ピン)、CS=GP13 (16番ピン)、DC=GP16 (20番ピン)、RESET=GP12 (15番ピン)
+//  SCK=GP14 (19番ピン)、MOSI=GP15 (20番ピン)、CS=GP13 (17番ピン)、DC=GP16 (21番ピン)、RESET=GP12 (16番ピン)
 //  VCC=3.3V、LEDA=3.3V (抵抗経由で明るさ調整可)、GND=GND、SDO (MISO) は未接続 (書き込み専用)
 //SPI1はSDカード (SDON〜SDOFF、共有ピンGP6/8/10/11) と共用のため、SD使用中は
 //そのフレームの画面更新をスキップし、SDOFF後に自動で再開する

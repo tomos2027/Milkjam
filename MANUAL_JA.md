@@ -127,11 +127,11 @@ TFT液晶 (GP12-16) はDVI (HDMI sock、GP12-19) と**ピンを共用**するた
 
 | TFT端子 | GP | Pico 2 W物理ピン |
 |---|---|---|
-| SCK | GP14 | 18番 |
-| MOSI (SDA) | GP15 | 19番 |
-| CS | GP13 | 16番 |
-| DC | GP16 | 20番 |
-| RESET | GP12 | 15番 |
+| SCK | GP14 | 19番 |
+| MOSI (SDA) | GP15 | 20番 |
+| CS | GP13 | 17番 |
+| DC | GP16 | 21番 |
+| RESET | GP12 | 16番 |
 | VCC / LEDA | 3.3V | 3V3 (OUT) |
 | GND | GND | GND |
 | SDO (MISO) | 未接続可 | — (書き込み専用動作) |

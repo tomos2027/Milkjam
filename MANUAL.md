@@ -127,11 +127,11 @@ to avoid driving signals into the wrong peripheral. The lock state is saved to f
 
 | TFT pin | GP | Pico 2 W physical pin |
 |---|---|---|
-| SCK | GP14 | pin 18 |
-| MOSI (SDA) | GP15 | pin 19 |
-| CS | GP13 | pin 16 |
-| DC | GP16 | pin 20 |
-| RESET | GP12 | pin 15 |
+| SCK | GP14 | pin 19 |
+| MOSI (SDA) | GP15 | pin 20 |
+| CS | GP13 | pin 17 |
+| DC | GP16 | pin 21 |
+| RESET | GP12 | pin 16 |
 | VCC / LEDA | 3.3V | 3V3 (OUT) |
 | GND | GND | GND |
 | SDO (MISO) | optional | — (write-only operation) |
