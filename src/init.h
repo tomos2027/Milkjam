@@ -4,10 +4,18 @@
 
 //Raspberry Pi Pico 2 W (RP2350A + CYW43 WiFi)
 // TMDS bit clock 270 MHz (CEA-861 720x480p60、VREG 1.20V)
-//720*240ピクセル (2bpp、白=0b11/黒=0b00) の画面として扱う
+//720*240ピクセルの画面として扱う (HSTX: 4bppグレースケール、PicoDVIフォールバック: 2bpp)
 #define FRAME_MAX_WIDTH 720
 #define FRAME_MAX_HEIGHT 240
+#if MILKJAM_USE_HSTX
+//4bpp (16階調)。1ピクセル4bit、白=0xF、黒=0x0。1ライン=720*4/8=360バイト (90ワード)
+#define FRAME_BPP 4
+#define FRAME_BYTES_PER_LINE (FRAME_MAX_WIDTH / 2)
+#else
+//2bpp (4階調)。1ピクセル2bit、白=0b11、黒=0b00。1ライン=720*2/8=180バイト (45ワード)
+#define FRAME_BPP 2
 #define FRAME_BYTES_PER_LINE (FRAME_MAX_WIDTH * 2 / 8)
+#endif
 #define VREG_VSEL VREG_VOLTAGE_1_20
 #define SCANLINE_INIT 2
 
@@ -30,10 +38,22 @@
 #define CFG_LCD_ENABLED_OFF 188//LCDON/LCDOFFの排他状態 (1=LCD使用中: HDMIへの切替を禁止)
 
 //pico
-//2bpp (グレースケール) フレームバッファ。白=0b11、黒=0b00
+//グレースケールフレームバッファ (HSTX: 4bpp白=0xF黒=0x0、PicoDVIフォールバック: 2bpp白=0b11黒=0b00)
 static uint8_t framebuf[FRAME_BYTES_PER_LINE * FRAME_MAX_HEIGHT] __attribute__((aligned(4)));
 static uint8_t text_line[TEXT_WIDTH / 8];//1走査線分の文字データ (1bpp、横9/4補正前)
 
+#if MILKJAM_USE_HSTX
+#include "hstx_dvi.h"//HSTXドライバ (4bpp)。hstx_core1_main等を定義する
+
+//4ピクセル(4bit)を9ピクセル(36bit)へ横9/4拡大するための表
+//各ピクセルは4bpp (白=0xF、黒=0x0)、幅は3,2,2,2ピクセル (各ニブルは0xFか0x0)
+static const uint64_t expand9_4bpp[16] = {
+    0x000000000ULL, 0x000000FFFULL, 0x0000FF000ULL, 0x0000FFFFFULL,
+    0x00FF00000ULL, 0x00FF00FFFULL, 0x00FFFF000ULL, 0x00FFFFFFFULL,
+    0xFF0000000ULL, 0xFF0000FFFULL, 0xFF00FF000ULL, 0xFF00FFFFFULL,
+    0xFFFF00000ULL, 0xFFFF00FFFULL, 0xFFFFFF000ULL, 0xFFFFFFFFFULL
+};
+#else
 //4ピクセル(4bit)を9ピクセル(18bit)へ横9/4拡大するための表
 //各ピクセルは2bpp (白=0b11、黒=0b00)、幅は3,2,2,2ピクセル
 static const uint32_t expand9_2bpp[16] = {
@@ -68,9 +88,10 @@ void core1_scanline_callback() {
     scanline = (scanline + 1) % FRAME_MAX_HEIGHT;
     _g.linecnt++;
 }
+#endif
 
 //1scanline分vramの内容をframebufに反映する
-//framebufには720*240ピクセルの2bpp色情報が入っている(白0b11/黒0b00)
+//framebufには720*240ピクセルのグレースケール色情報が入っている (HSTX: 4bpp白=0xF/黒=0x0、フォールバック: 2bpp白=0b11/黒=0b00)
 //vramには32*24の文字情報が入っている(mag=1の場合)
 //_g.screen_bigは0~3の範囲
 void vram_to_framebuf_scanline(uint scanline, bool visible_cursor) {
@@ -78,7 +99,7 @@ void vram_to_framebuf_scanline(uint scanline, bool visible_cursor) {
     int mag = 1 << _g.screen_big;//文字の大きさの倍率　最大8倍
     if (0 <= vram_y && vram_y < SCREEN_H) {//scanlineが画面の表示範囲なら処理、そうでなければ黒のままでいいので何もしない
         int font_y = ((scanline - MARGIN_HEIGHT) % (FONT_SIZE << _g.screen_big)) >> _g.screen_big;
-        uint32_t acc = 0;
+        uint64_t acc = 0;
         int nbits = 0;
         uint8_t* dst = text_line;
         uint8* c = &vram[vram_y * SCREEN_W];
@@ -104,17 +125,23 @@ void vram_to_framebuf_scanline(uint scanline, bool visible_cursor) {
                 }
             }
         }
-        //256ピクセル(1bpp)を576ピクセル(2bpp)へ横9/4拡大する
+        //256ピクセル(1bpp)を576ピクセルへ横9/4拡大する
         //(4ピクセルを9ピクセルへ、幅3,2,2,2で拡大する)
-        uint8_t* out = &framebuf[scanline * FRAME_BYTES_PER_LINE + MARGIN_WIDTH * 2 / 8];
+        uint8_t* out = &framebuf[scanline * FRAME_BYTES_PER_LINE + MARGIN_WIDTH * FRAME_BPP / 8];
         acc = 0;
         nbits = 0;
         for (int i = 0; i < sizeof(text_line); i++) {
             uint8_t b = text_line[i];
             for (int half = 0; half < 2; half++) {
+#if MILKJAM_USE_HSTX
+                uint64_t pat = expand9_4bpp[(b >> (half * 4)) & 0x0f];
+                acc |= pat << nbits;
+                nbits += 36;
+#else
                 uint32_t pat = expand9_2bpp[(b >> (half * 4)) & 0x0f];
                 acc |= pat << nbits;
                 nbits += 18;
+#endif
                 while (nbits >= 8) {
                     *out++ = (uint8_t)acc;
                     acc >>= 8;
@@ -162,6 +189,40 @@ void vram_to_tvram_all(bool visible_cursor) {
         cursor_pos = _g.cursory * SCREEN_W + _g.cursorx;
     }
 
+    // ===== カラーモード (VIDEO 9/10: IJ_COLOR / COLOR_TEXT) =====
+    // セル属性 = 下位4bit前景 / 上位4bit背景。反転・カーソルは前景と背景を入れ替える。
+    if (videomode == VMODE_IJCOLOR) {
+        // 32x24 IchigoJam互換レイアウト + カラー属性
+        ntsc_mag = 1;
+        for (int y = 0; y < SCREEN_H; y++) {
+            for (int x = 0; x < SCREEN_W; x++) {
+                int idx = y * SCREEN_W + x;
+                uint8 a = screen_attr[idx];
+                if (_g.screen_invert || idx == cursor_pos)
+                    a = (uint8)(((a & 0x0F) << 4) | ((a >> 4) & 0x0F));
+                TVRAM[idx] = vram[idx];
+                TVRAM[IJ_ATTROFFSET + idx] = a;
+            }
+        }
+        return;
+    }
+    if (videomode == VMODE_WIDETEXT) {
+        // 42x27グリッド。32x24のテキストを左上に配置し、残りは背景色0。
+        ntsc_mag = 1;
+        for (int y = 0; y < SCREEN_H; y++) {
+            for (int x = 0; x < SCREEN_W; x++) {
+                int idx = y * SCREEN_W + x;
+                uint8 a = screen_attr[idx];
+                if (_g.screen_invert || idx == cursor_pos)
+                    a = (uint8)(((a & 0x0F) << 4) | ((a >> 4) & 0x0F));
+                TVRAM[y * WIDTH_X + x] = vram[idx];
+                TVRAM[ATTROFFSET + y * WIDTH_X + x] = a;
+            }
+        }
+        return;
+    }
+
+    // ===== 単色 IJTEXT (VIDEO 1-4) =====
     uint8 attr = _g.screen_invert ? IJ_ATTR_INVERT : 0;
     int mag = 1 << _g.screen_big;
     ntsc_mag = mag;//NTSC描画側に拡大倍率を伝える (複製セルを拡大グリフの断片として描画する)
@@ -189,6 +250,7 @@ void ntsc_init() {
     memcpy(ntsc_fontram, CHAR_PATTERN, 256 * 8);
     Fontp = ntsc_fontram;
     rp2040_pwm_ntsc_init(NTSC_PIN);
+    screen_reset_palette();//COLOR用16色パレットをNTSCドライバへ反映
     ntsc_set_line_callback(ntsc_line_callback);
     //IJTEXTモードへ直接設定する (set_videomodeだとstop/start_compositeが走り同期が乱れるため)
     videomode = VMODE_IJTEXT;
@@ -232,10 +294,11 @@ void save_video_mode_config(uint8_t mode) {
         int save = save_and_disable_interrupts();
         flash_range_erase(offset, FLASH_SECTOR_SIZE);
         flash_range_program(offset, tflash, FLASH_SECTOR_SIZE);
+        restore_interrupts(save);
         if (active) {
+            //再開は割込み復帰後に行う (開始処理が割込みを必要とする実装になっても安全なように)
             video_on();
         }
-        restore_interrupts(save);
     } else {
         //NTSCは映像を止めずに書き込む (DMAチェーンはSRAMだけで動くので、割り込み禁止中も同期信号は保たれ、
         //画面は書込中一時フリーズするだけ)。TFTも同様 (SPIはタイマー割り込み駆動のため書込中は更新が止まるだけ)
@@ -253,7 +316,45 @@ void save_video_mode_config(uint8_t mode) {
 
 //DVI/core1が初期化済みか (NTSC/TFTモードで起動したときはSWITCH 0のときまで初期化されない)
 static bool dvi_initialized = false;
+#if !MILKJAM_USE_HSTX
 void picodvi_init();//後ろで定義
+#endif
+
+//HDMI (DVI) バックエンドの初期化・開始・停止・状態取得
+//HSTXビルドではsrc/hstx_dvi.hの実装、フォールバックビルドではPicoDVI (PIO) を使用する
+void dvi_backend_init() {
+#if MILKJAM_USE_HSTX
+    hstx_dvi_prepare();
+    dvi_initialized = true;
+    dvi_backend_start();//core1 (起動済み) へSTARTコマンドを送り、処理完了まで待つ
+#else
+    picodvi_init();
+#endif
+}
+
+void dvi_backend_start() {
+#if MILKJAM_USE_HSTX
+    hstx_dvi_start();
+#else
+    dvi_start(&dvi0);
+#endif
+}
+
+void dvi_backend_stop() {
+#if MILKJAM_USE_HSTX
+    hstx_dvi_stop();
+#else
+    dvi_stop(&dvi0);
+#endif
+}
+
+int dvi_backend_active() {
+#if MILKJAM_USE_HSTX
+    return hstx_dvi_active();
+#else
+    return dvi0.dvi_started;
+#endif
+}
 
 //SWITCHコマンドでDVI(HDMI)/NTSC(コンポジット)/TFT(ILI9341)を切り替える
 //NTSCは専用クロック (157.5MHz)、DVI/TFTは同一クロック (270MHz) なのでTFT⇔DVIはクロック変更不要
@@ -267,27 +368,28 @@ void video_switch_mode(uint8_t mode) {
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         tft_stop();
     } else {
-        dvi_stop(&dvi0);
+        dvi_backend_stop();
     }
     if (mode == VIDEO_MODE_NTSC) {
         set_sys_clock_khz(NTSC_CLOCK_KHZ, true);
     } else {
-        set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
+        set_sys_clock_khz(VIDEO_BIT_CLK_KHZ, true);
     }
     restore_interrupts(save);//割り込み禁止区間は最小にする (NTSCの走査線更新が遅れるため)
     set_uart_bps();
     io_reconfig_pwm();
     sd_reconfig_spi();//SD使用中ならSPI1のbaudを新しいクロックに合わせ直す
     video_output_mode = mode;
+    sound_update_mode_gate();//ビデオモードに応じて音声 (PSG) の使用可否を更新
     if (mode == VIDEO_MODE_NTSC) {
         ntsc_init();
     } else if (mode == VIDEO_MODE_TFT) {
         tft_start();
     } else {
         if (dvi_initialized) {
-            dvi_start(&dvi0);//core1の割込み・キュー待ちは生きているので即再開する
+            dvi_backend_start();//core1の割込み待ちは生きているので即再開する
         } else {
-            picodvi_init();//NTSC/TFTモードで起動したときはDVIもcore1も未初期化なのでここで初期化する
+            dvi_backend_init();//NTSC/TFTモードで起動したときはDVIもcore1も未初期化なのでここで初期化する
         }
     }
     save_video_mode_config(mode);
@@ -391,6 +493,46 @@ void putc_long_press_key() {
     restore_interrupts(save);
 }
 
+//===== PICO2内蔵LED (CYW43 WL_GPIO0) のハートビート/診断表示 =====
+//起動モードを点滅回数で伝える: HDMI/DVI/TFT=2回、NTSC=3回+3秒消灯
+//通常は約1Hzのハートビート点滅、エラー検知時は常時点灯、NTSCメモリ破壊検知時は高速点滅
+static bool heartbeat_wdt_reset;//直前のリセット原因がウォッチドッグ (core0固まりによる自動再起動)
+static bool heartbeat_boot_active;//ブートシーケンス実行中 (timer()のハートビートを抑止)
+
+//ハートビートLED用のエラー判定 (true=エラー、LED常時点灯)
+static bool heartbeat_has_error() {
+    if (ntsc_diag_error) return true;//NTSC診断エラー (メモリ破壊等)
+    if (!video_active()) return true;//ビデオ出力が停止/未初期化
+    if (!iotpad_wifi_started) return true;//CYW43 (WiFi) 初期化失敗
+    if (heartbeat_wdt_reset) return true;//ウォッチドッグ再起動後 (前回core0が固まっていた)
+    return false;
+}
+
+//ブート時ハートビートシーケンス (iotpad_wifi_bootinit()の後、cyw43_arch_init成功後に呼ぶ)
+//HDMI/DVI/TFTで起動: 2回点滅 → ハートビートへ
+//NTSCで起動: 3回点滅 → 3秒消灯 → 正常ならハートビートへ、エラーなら常時点灯
+void heartbeat_boot_sequence() {
+    heartbeat_wdt_reset = watchdog_caused_reboot();//リセット原因を記録
+    heartbeat_boot_active = true;//シーケンス中はtimer()のハートビートを止める
+    int blinks = (video_output_mode == VIDEO_MODE_NTSC) ? 3 : 2;
+    for (int i = 0; i < blinks; i++) {
+        iotpad_wl_led_set(true);
+        iotpad_wl_led_apply();//メインスレッドなので即時反映できる
+        sleep_ms(200);
+        iotpad_wl_led_set(false);
+        iotpad_wl_led_apply();
+        sleep_ms(200);
+    }
+    if (video_output_mode == VIDEO_MODE_NTSC) {
+        sleep_ms(3000);//3秒消灯 (NTSCドライバの安定待ちを兼ねる)
+        if (heartbeat_has_error()) {
+            iotpad_wl_led_set(true);//エラー: 常時点灯
+            iotpad_wl_led_apply();
+        }
+    }
+    heartbeat_boot_active = false;
+}
+
 bool timer(repeating_timer_t* rt) {
     frames++;
     watchdog_update();//ウォッチドッグをfeedする (core0が固まったら自動再起動)
@@ -402,14 +544,32 @@ bool timer(repeating_timer_t* rt) {
             uint32_t err = 0;
             if (Fontp != ntsc_fontram) err |= 1;//フォントポインタ破壊
             if (vram != (uint8*)RAM_VRAM) err |= 2;//VRAMポインタ破壊
-            if (videomode != VMODE_IJTEXT) err |= 4;//ビデオモード破壊
+            if (videomode != VMODE_IJTEXT && videomode != VMODE_IJCOLOR &&
+                videomode != VMODE_WIDETEXT && videomode != VMODE_MONOTEXT &&
+                videomode != VMODE_WIDEGRPH) err |= 4;//ビデオモード破壊
             if (ntsc_fg.canary1 != 0xC0DE6001 || ntsc_fg.canary2 != 0xC0DE6002) err |= 8;//フォントRAM境界破壊
-            if (ntsc_dma_buf.canary1 != 0xD1A6B001 || ntsc_dma_buf.canary2 != 0xD1A6B002) err |= 16;//DMAバッファ境界破壊
+            if (ntscv_guard_a() != NTSCV_GUARD_A_VALUE || ntscv_guard_b() != NTSCV_GUARD_B_VALUE) err |= 16;//DMAバッファ境界破壊
             if (ntsc_scanline() >= NUM_LINES) err |= 32;//走査線カウンタ破壊
             if (ntsc_mag != 1 && ntsc_mag != 2 && ntsc_mag != 4 && ntsc_mag != 8) err |= 64;//拡大倍率破壊
-            if (err && !ntsc_diag_error) {
-                ntsc_diag_error = err;
-                ntsc_diag_frames = frames;
+            //瞬間的な遷移 (SAVE/KBDフラッシュ書込後の再初期化やCOLOR用のntsc_restart_modeで
+            //約1ms以内に復帰する一時状態) の誤検知を防ぐため、
+            //同一エラーが3フレーム連続 (50ms) 継続した場合のみラッチする
+            static uint32_t diag_prev_err = 0;
+            static uint8_t diag_persist = 0;
+            if (err) {
+                if (!ntsc_diag_error) {
+                    if (err == diag_prev_err) {
+                        if (++diag_persist >= 3) {
+                            ntsc_diag_error = err;
+                            ntsc_diag_frames = frames;
+                        }
+                    } else {
+                        diag_prev_err = err;
+                        diag_persist = 1;
+                    }
+                }
+            } else {
+                diag_persist = 0;//エラーが消えたら連続カウントをリセット
             }
             if (ntsc_diag_error) {
                 //TVRAMへ直接エラー番号を書く (VRAM経由でないのでVRAMが壊れていても表示される)
@@ -424,6 +584,11 @@ bool timer(repeating_timer_t* rt) {
                 *p++ = '0' + f / 100;
                 *p++ = '0' + (f / 10) % 10;
                 *p++ = '0' + f % 10;
+                //E番号が見えるよう、先頭8セルの属性を白(前景7/背景0)にする (カラーモード用)
+                for (int i = 0; i < 8; i++) {
+                    TVRAM[IJ_ATTROFFSET + i] = 0x07;
+                    TVRAM[ATTROFFSET + i] = 0x07;
+                }
             } else {
                 vram_to_tvram_all(_g.cursorflg);
             }
@@ -439,13 +604,15 @@ bool timer(repeating_timer_t* rt) {
     //pico-sdk/lib/tinyusb/src/osal/osal_pico.h　のosal_task_delay()のsleepをwhileループに置き換えるとPicoDVIなしで一応解決する
     tuh_task();
     putc_long_press_key();
-    //LEDの診断表示 (NTSCモード): 通常は約1Hzで点滅、メモリ破壊検知時は高速点滅、点滅が止まっていたらcore0が固まっている
-    //Pico 2 W: 基板LEDはCYW43経由 (GP25等はWiFi SPIバスのためGPIO操作禁止)
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    //PICO2内蔵LED (CYW43経由) の診断表示: 通常は約1Hzで点滅、エラー検知時は常時点灯、
+    //NTSCメモリ破壊検知時は高速点滅。点滅が止まっていたらcore0が固まっている (ウォッチドッグが8秒後に再起動)
+    if (!heartbeat_boot_active) {//ブートシーケンス実行中はLEDに触れない
         if (ntsc_diag_error) {
-            if ((frames & 7) == 0) iotpad_led_toggle();
+            if ((frames & 7) == 0) iotpad_wl_led_toggle();
+        } else if (heartbeat_has_error()) {
+            iotpad_wl_led_set(true);//エラー: 常時点灯
         } else if ((frames & 31) == 0) {
-            iotpad_led_toggle();
+            iotpad_wl_led_toggle();//ハートビート: 約1Hz
         }
     }
     return true;
@@ -499,8 +666,8 @@ void hardfault_report(uint32_t* frame, uint32_t exc_lr) {
     #undef HF_PUTS
     #undef HF_PUTHEX
     for (;;) {
-        iotpad_led_toggle();
-        busy_wait_us(60000);//約8Hz点滅
+        iotpad_led_toggle();//GP2の基板LEDを約8Hz点滅 ※ハードフォールト中はメインループが止まりCYW43 (内蔵LED) は操作不可のためGP2を使用
+        busy_wait_us(60000);
     }
 }
 //例外フレームを取得してから報告に渡す (naked: スタックフレームの位置を壊さない)
@@ -566,7 +733,7 @@ void pico_init() {
     if (video_output_mode == VIDEO_MODE_NTSC) {
         set_sys_clock_khz(NTSC_CLOCK_KHZ, true);
     } else {
-        set_sys_clock_khz(DVI_TIMING.bit_clk_khz, true);
+        set_sys_clock_khz(VIDEO_BIT_CLK_KHZ, true);
     }
 
     stdio_uart_init();//クロックを変えてから初期化する
@@ -589,6 +756,26 @@ void pico_init() {
     //Pico 2 W: WiFi初期化はmain()のichigojam_init()後に行う (画面表示を優先するため)
 }
 
+#if !MILKJAM_USE_HSTX
+//PicoDVIビルド: core1は起動時に音声ホストとして立ち上がる (core1_psg_dvi_entry)。
+//DVIがNTSC/TFT起動後から使われるときはこの関数がFIFOでcore1を起床させる
+#define PICODVI_CORE1_CMD_RUN 1
+static volatile bool picodvi_boot_dvi = false;
+static bool picodvi_core1_launched = false;
+
+//core1エントリ: 音声アラームプールを設定し、DVI起動時はTMDSエンコードループへ入る
+//NTSC/TFT起動時はDVI開始指示 (picodvi_init) をFIFOで待つ。
+//DVI停止中もcore1はTMDSループのキュー待ちでブロックされたままなので、
+//音声タイマー割込みは引き続きcore1で動く (PSGはNTSC/TFTモードで使用可能)
+static void core1_psg_dvi_entry() {
+    psg_audio_core1_setup();
+    if (picodvi_boot_dvi) {
+        core1_main();//dvi_register_irqs+dvi_start+TMDSループ (戻らない)
+    }
+    multicore_fifo_pop_blocking();//DVI開始指示を待つ
+    core1_main();
+}
+
 void picodvi_init() {
     dvi0.timing = &DVI_TIMING;
     dvi0.ser_cfg = DVI_DEFAULT_SERIAL_CONFIG;//CMakeLists.txtでpico_sock_cfg (Pico DVI sockピン: GP12-19) を指定
@@ -606,18 +793,50 @@ void picodvi_init() {
         bufptr += FRAME_BYTES_PER_LINE / 4;
     }
 
-    multicore_launch_core1(core1_main);
+    if (picodvi_core1_launched) {
+        //待機中のcore1を起床させる (core1_main: dvi_register_irqs+dvi_start)
+        multicore_fifo_push_blocking(PICODVI_CORE1_CMD_RUN);
+    }
     dvi_initialized = true;
 }
+#endif
 
 //起動時に、保存されたモードでビデオ出力を初期化する (main()から呼ばれる)
+//core1は両ビルドとも起動時に立ち上げる (PSG音声タイマーのホスト)。
+//HSTXビルド: core1はHSTX DMA割込み+音声を担当し、映像開始はFIFOのSTARTコマンドで行う
+//PicoDVIビルド: core1は音声を担当し、DVI起動時はTMDSエンコードループへ入る
 void video_output_init() {
+    sound_update_mode_gate();//ビデオモードに応じて音声 (PSG) の使用可否を設定
+    dbg_str("[C0] video_output_init mode=");
+    dbg_hex(video_output_mode);
+    dbg_str("\r\n");
+#if MILKJAM_USE_HSTX
+    hstx_core1_launch();
+#endif
     if (video_output_mode == VIDEO_MODE_NTSC) {
+#if !MILKJAM_USE_HSTX
+        picodvi_boot_dvi = false;
+        multicore_launch_core1(core1_psg_dvi_entry);//音声+FIFO待機 (DVI開始時に起床)
+        picodvi_core1_launched = true;
+#endif
         ntsc_init();
     } else if (video_output_mode == VIDEO_MODE_TFT) {
+#if !MILKJAM_USE_HSTX
+        picodvi_boot_dvi = false;
+        multicore_launch_core1(core1_psg_dvi_entry);
+        picodvi_core1_launched = true;
+#endif
         tft_start();
     } else {
-        picodvi_init();
+#if !MILKJAM_USE_HSTX
+        picodvi_boot_dvi = true;//core1が即core1_main (dvi_start) へ進むためlaunch前に決める
+#endif
+        dvi_backend_init();
+#if !MILKJAM_USE_HSTX
+        //dvi0設定 (picodvi_init) 済みであることをcore1_mainが要求するため、設定後にlaunchする
+        multicore_launch_core1(core1_psg_dvi_entry);
+        picodvi_core1_launched = true;
+#endif
     }
 }
 

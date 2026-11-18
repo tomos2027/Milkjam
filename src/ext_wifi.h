@@ -62,13 +62,46 @@ void iotpad_led_toggle() {
 }
 
 //WiFi状態をPico Wモジュールの内蔵LED (CYW43 WL_GPIO0) に表示: 接続済み=点灯
+//WS.LED 0で内蔵LEDを制御中 (ws_builtin_led_override) は書換を抑止する
 static bool iotpad_wl_led_on;
 static void iotpad_wifi_update_status_led(bool connected) {
     if (!iotpad_wifi_started || connected == iotpad_wl_led_on) return;
+    if (ws_builtin_led_override) return;//WS.LED 0が内蔵LEDを占有中
     iotpad_wl_led_on = connected;
     cyw43_arch_lwip_begin();
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, connected);
     cyw43_arch_lwip_end();
+}
+
+//PICO2内蔵LED (CYW43 WL_GPIO0) のハートビート/診断表示用
+//CYW43操作 (cyw43_arch_gpio_put) は割り込みコンテキストから呼べない (デッドロック/未定義動作) ため、
+//iotpad_wl_led_set()/iotpad_wl_led_toggle()は割り込み (timer()) からも呼べるよう
+//希望状態の記録のみを行い、実際のGPIO操作はメインスレッドのiotpad_wl_led_apply()で行う
+static volatile bool iotpad_wl_led_target;//希望状態 (割り込みからも書くためvolatile)
+static volatile bool iotpad_wl_led_dirty;//未反映の希望状態あり
+void iotpad_wl_led_set(bool on) {
+    if (iotpad_wl_led_target != on) {
+        iotpad_wl_led_target = on;
+        iotpad_wl_led_dirty = true;
+    }
+}
+void iotpad_wl_led_toggle() {
+    iotpad_wl_led_set(!iotpad_wl_led_target);
+}
+//内蔵LEDへ希望状態を反映 (メインスレッド限定! main()ループとheartbeat_boot_sequence()から呼ぶ)
+//iotpad_wifi_bootinit()の後 (cyw43_arch_init成功後) でないと操作不可
+//ハートビートが内蔵LEDを専有するため、WiFi状態LEDやWS.LED 0による上書きを抑止する
+void iotpad_wl_led_apply() {
+    if (!iotpad_wl_led_dirty) return;
+    iotpad_wl_led_dirty = false;
+    if (!iotpad_wifi_started) return;
+    ws_builtin_led_override = true;
+    if (iotpad_wl_led_on != iotpad_wl_led_target) {
+        iotpad_wl_led_on = iotpad_wl_led_target;
+        cyw43_arch_lwip_begin();
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, iotpad_wl_led_on);
+        cyw43_arch_lwip_end();
+    }
 }
 
 //NTP同期済みのUNIXミリ秒 (未同期=0) — ThingsBoard送信のtsに使用

@@ -28,11 +28,18 @@ BME280 (温度/湿度/気圧) / BH1750 (照度) / LTR390 (照度2/UV) / VL53L0X 
 | `SWITCH 2` | **TFT液晶 ILI9341** | GP12-16 (**HDMIピンと排他**) | 270MHz |
 
 - `SWITCH 2,1` でTFTを180°回転。モードと回転設定はflashに保存され、次回起動時にそのモードで起動する
+- HDMI出力はRP2350の**HSTXペリフェラルを直接駆動**する (`src/hstx_dvi.h`、4bppグレースケール・白94%)。PicoDVI (PIO) を使う従来実装はフォールバックとして残してあり、`cmake -DMILKJAM_USE_HSTX=0` でビルドできる (2bpp・白75%)
+- **NTSC出力は独自実装ライブラリ ntscv** (`src/video/`、クリーンルーム実装、`docs/ntsc_video_spec.md` 参照)。PWM+DMA 4チャネルリングで割込み禁止に強く、**カラー表示**に対応 (下記COLOR/VIDEO 9/10)
+- **PSG多声サウンド** (AY-3-8910エミュ): core1の専用タイマーで駆動し映像と分離しているため、全表示モードでクリアな音が出る
+  - `PLAY "MML1","MML2","MML3"` — 最大3声の同時演奏 (MSX互換MML、`V`音量コマンド対応)
+  - `SOUND reg,val` — PSGレジスタ (R0-R13) 直接操作
+  - BEEP/単声PLAYは従来どおりPWMトーンモード (ハードPWMのクリアな方形波)
+  - ※PicoDVIビルドではHDMI表示中は多声PSGを停止しPWMトーンのみ (NTSC/TFT表示中は3声とも使用可)
 - **LCDON / LCDOFFコマンド** (新設): TFT液晶 (GP12-16) はHDMI sock (GP12-19) とピンを共用するため**排他で使用**します
   - `LCDON` — LCDを有効化してLCDモードへ切替。以後 `SWITCH 0` (HDMI) はブロック (メッセージ表示のみ)
   - `LCDOFF` — LCDを無効化 (LCDモード中ならHDMIへ切替)。以後 `SWITCH 2` (LCD) はブロック
   - NTSC (GP3) は排他ピンではないため常に切替可能。排他状態はflashに保存
-- **WS.LED** (WS2812B): ポート1-7 (OUT1-6＋LED/GP2)。**PIO送信**のため長いLEDテープでも表示やUSBキーボードが乱れない。SDON中は共有ピン (ポート1/3/4) の送信をブロック
+- **WS.LED** (WS2812B): ポート0-7 (0=**内蔵LED (CYW43)**、1-6=OUT1-6、7=LED/GP2)。**PIO送信**のため長いLEDテープでも表示やUSBキーボードが乱れない。SDON中は共有ピン (ポート1/3/4) の送信をブロック。`WS.LED 0,n` はPico 2 Wの内蔵LEDを点灯/消灯 (単色のため配列[0]-[2]のいずれかが0でなければ点灯)
 
 ### SDカード (`SDON` / `SDOFF`、スロット200-299)
 - `SDON` — SDカードを初期化 (FAT32)。共有ピン (IN3/IN4/OUT1/OUT3/OUT4) のI/O命令はブロックされる
@@ -45,6 +52,11 @@ BME280 (温度/湿度/気圧) / BH1750 (照度) / LTR390 (照度2/UV) / VL53L0X 
 
 ### BASIC (IchigoJam_P 4K版ベース)
 - プログラム領域4096バイト、拡張配列変数 [0]-[357]、`IR.IN` / `ENV.IN` 等
+- **NTSCカラー表示** (NTSCモードのみ): `COLOR 前景[,背景]` / `COL` (省略形)、`PAL n,v` (v=RGB332) / `PAL n,r,g,b` / `PAL RESET`、`PAL(n)` 関数、`ATTR x,y,a` / `ATTR(x,y)` 関数 (セル属性: 下位4bit前景/上位4bit背景)
+  - `VIDEO 9` — 32x24 16色 / `VIDEO 10` — 42x27 16色 (戻すときは `VIDEO 1`)
+  - HDMI/TFTモードでは白黒描画のためこれらのコマンドは値の保持のみ (表示に反映されない)
+- **NEC赤外線送信 `IR.OUT`**: `IR.OUT port,data[,repeat]` (data=上位8bitアドレス/下位8bitコマンド)、`IR.OUT port,[n][,repeat]` で `IR.IN` の受信結果を再送。38kHzキャリアはPWM高速モードで生成
+- **`PWM port,plen[,period]` 高速モード**: periodに負値で1/48µs単位 (`PWM 5,630,-1260` = 38kHz 50%、赤外線送信と同じ)
 - 保存: 内蔵フラッシュ25本 (0-24) / 外部EEPROM (100-131) / **SDカード (200-299)**
 - `VER()` = 16130 / `VER(1)` = 9 (RP2350)
 
@@ -78,7 +90,7 @@ PAD.IN [100]
     - **pico-sdk**: https://github.com/raspberrypi/pico-sdk.git 2.3.1 (コミット `079c6f3`) `git submodule update --init --recursive` でサブモジュールも更新する
     - **pico-extras**: https://github.com/raspberrypi/pico-extras.git master (コミット `52fd7a7`)
     - **PicoDVI**: https://github.com/mlorenzati/PicoDVI.git master (動作確認: コミット `9eca921`)
-- PicoDVIパッチを当てる (SWITCHコマンドによるDVI/NTSC/TFT切替の安定化に必須)
+- PicoDVIパッチを当てる (PicoDVIフォールバックビルド `-DMILKJAM_USE_HSTX=0` 時のSWITCHコマンドによるDVI/NTSC/TFT切替の安定化に必須。HSTX既定ビルドでは未使用だが当てておいても害はない)
     `PicoDVI`ディレクトリで`patches/picodvi_dvi_stop_race_fix.patch`を適用する
     ```sh
     cd PicoDVI
@@ -110,6 +122,9 @@ cmake ..
 make
 ```
 
+- 既定 (HSTXバックエンド、4bppグレースケール): 上記のまま。RP2350 (Pico 2 W) 専用
+- PicoDVI (PIO) フォールバック、2bppグレースケールでビルドする場合: `cmake -DMILKJAM_USE_HSTX=0 ..`
+
 `milkjam.uf2`ファイルが作成できたらPico 2 Wに書き込む (BOOTボタンを押しながら接続し、RPI-RP2ドライブへドラッグ＆ドロップ)
 
 ## ライセンス / license
@@ -123,11 +138,11 @@ Copyright 2014-2025 the IchigoJam authors. All rights reserved. MIT license.
 ### SDカードドライバ / SD card driver (`src/sd_card.h`)
 [Canon-boy4氏 GivetakeJam_P](https://github.com/Canon-boy4/ichigojam-firm/tree/rp2350-16130) (rp2350-16130ブランチ、MIT license) の実装を [IchigoJam-RP2040Zero](../IchigoJam-RP2040Zero) 経由で改変して収録しています。
 
-### NTSC出力コード / NTSC output code (`src/ntsc/`)
-NTSCコンポジット映像出力コード (`src/ntsc/`) は KenKen 氏による著作物です。
-- 営利目的でなければ自由に利用可能。利用したものを公開する場合は、利用している旨をどこか (Webサイト等) に記載すること
-- 営利利用については個別判断 (掲示板等で連絡のこと)
-- 著作者: [KenKen](http://www.ze.em-net.ne.jp/~kenken/profile/index.html) — Copyright (C) 2024, KenKen, all right reserved.
+### NTSC出力コード / NTSC output code (`src/video/`, `src/ntsc/ntsc_compat.h`)
+NTSC映像出力ライブラリ ntscv (`src/video/`) は公開規格 (NTSC / SMPTE 170M) と pico-sdk (BSD-3-Clause) の情報のみから新規に記述した独自実装です (PWM+DMAの着想は @lovyan03 氏)。MIT license, Copyright (c) 2026 the IchigoJam-RP2040Zero authors。仕様書は `docs/ntsc_video_spec.md` を参照。
+
+### PSGエミュレーション (`src/psg_emu.h`, `src/psg_mml3.h`)
+AY-3-8910 (MSX互換) PSGエミュレーションと3ch MMLパーサー。ベースの IchigoJam_BASIC (MIT) に対する拡張実装で、ライセンスは本体に準じます (MIT license, Copyright 2014-2025 the IchigoJam authors)。
 
 ### OLEDフォントデータ / OLED font data (`src/oled_fonts.h`)
 OLED表示用フォントデータ (`src/oled_fonts.h`) は [U8g2](https://github.com/olikraus/u8g2) ライブラリ (olikraus, BSD-3-Clause license) のフォントデータを`tools/gen_oled_fonts.py`で変換したものです。

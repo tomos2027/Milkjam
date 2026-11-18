@@ -31,6 +31,15 @@
 extern int bootflg;
 #endif
 
+//ビデオ出力モード (display.hで定義)。VIDEO 9/10 (NTSCカラー) がNTSCモードか判定するために参照する
+//display.hはbasic.hより後にincludeされるためここで前方宣言する (定義はdisplay.h)
+extern uint8_t video_output_mode;
+#ifndef VIDEO_MODE_DVI
+#define VIDEO_MODE_DVI 0
+#define VIDEO_MODE_NTSC 1
+#define VIDEO_MODE_TFT 2
+#endif
+
 //void wait(int n);
 //void _printf(const char* fmt, ...);
 STATIC void put_chr(char c);
@@ -418,8 +427,14 @@ S_INLINE void command_iot_out();
 #endif
 S_INLINE void command_ws_out();
 S_INLINE void command_ir_in(); // NEC赤外線受信 IR.IN port,[n] (4K版、GivetakeJam_P準拠)
-S_INLINE void command_env_in(); // AHT20+BMP280環境センサー ENV.IN [n] (4K版、GivetakeJam_P準拠)
+S_INLINE void command_ir_out(); // NEC赤外線送信 IR.OUT port,data[,repeat] / IR.OUT port,[n][,repeat]
 static int ir_port_to_gpio(int port); // BASICのINポート番号→GPIO番号 (io.hで定義)
+static int ir_nec_tx(int port, uint32_t frame, int repeat); // NEC赤外線送信エンジン (io.hで定義)
+S_INLINE void command_sound_psg(); // MSX PSG レジスタ直接操作 (SOUND reg,val)
+S_INLINE void command_color(); // COLOR/COL f[,b[,c]] (NTSCカラー)
+S_INLINE void command_pal();   // PAL n,v / PAL RESET
+S_INLINE void command_attr();  // ATTR x,y,a
+S_INLINE void command_env_in(); // AHT20+BMP280環境センサー ENV.IN [n] (4K版、GivetakeJam_P準拠)
 S_INLINE void command_ej(); // IOTPADコマンド EJ "CMD"[,"ARG"] (Pico W)
 S_INLINE int func_ej(); // IOTPADコマンド関数 EJ("CMD") (Pico W)
 S_INLINE void command_pad_in(); // IOTPADセンサー一括読み取り PAD.IN [n] (Pico W)
@@ -635,11 +650,19 @@ int basic_execute(char* commandline) {
 			//case TOKEN_WS_OUT:	command_ws_out();							break;
 			case TOKEN_WS_LED:	command_ws_out();							break; // WS.LED port,n[,repeat] ポート選択式 (4K版)
 			case TOKEN_IR_IN:	command_ir_in();							break; // 4K版 (GivetakeJam_P準拠)
+			case TOKEN_IR_OUT:	command_ir_out();							break; // NEC赤外線送信: IR.OUT port,data[,repeat] / IR.OUT port,[n][,repeat]
 			case TOKEN_ENV_IN:	command_env_in();							break; // 4K版 (GivetakeJam_P準拠)
 			case TOKEN_EJ:		command_ej();								break; // IOTPADコマンド (Pico W)
 			case TOKEN_PAD_IN:	command_pad_in();							break; // IOTPADセンサー一括読み取り (Pico W)
 			case TOKEN_LCDON:	IJB_lcdon();								break; // LCDON: LCD(TFT)モードへ切替+HDMI排他ロック
 			case TOKEN_LCDOFF:	IJB_lcdoff();								break; // LCDOFF: LCD排他ロック解除+HDMI(DVI)モードへ切替
+			case TOKEN_COLOR:
+			case TOKEN_COL:		command_color();						break; // COLOR/COL f[,b[,c]] (NTSCカラー)
+			case TOKEN_PAL:		command_pal();							break; // PAL n,v / PAL RESET
+			case TOKEN_ATTR:	command_attr();							break; // ATTR x,y,a
+			case TOKEN_SOUND:	// SOUND(reg,val) 括弧形式 (関数トークン流用)
+			case TOKEN_SOUND_PSG:	// SOUND reg,val 命令形式 (MSX PSG レジスタ直接操作)
+						command_sound_psg();					break;
 			default:
 				#ifdef USE_EXTENSION
 				if (extension_command(token.code)) {
@@ -1355,6 +1378,33 @@ static int16 token_expression5() {
 				break;
 			}
 			return psg_sound();
+		case TOKEN_PAL_FN: { // PAL(n) 色番号nのRGB332値を取得
+			int16 color = token_expression();
+			IJB_ERR_CHK1(0);
+			Token_get(t);
+			if (t.code != TOKEN_PAREN_E) {
+				command_error(ERR_SYNTAX_ERROR);
+				break;
+			}
+			return screen_get_palette(color);
+		}
+		case TOKEN_ATTR_FN: { // ATTR(x,y) 座標x,yの色属性を取得
+			int16 x = token_expression();
+			IJB_ERR_CHK1(0);
+			Token_get(t);
+			if (t.code != TOKEN_COMMA) {
+				command_error(ERR_SYNTAX_ERROR);
+				break;
+			}
+			int16 y = token_expression();
+			IJB_ERR_CHK1(0);
+			Token_get(t);
+			if (t.code != TOKEN_PAREN_E) {
+				command_error(ERR_SYNTAX_ERROR);
+				break;
+			}
+			return screen_get_attr(x, y);
+		}
 		case TOKEN_ANA:
 			return IJB_ana(token_opt1());
 		case TOKEN_FREE:
@@ -3123,7 +3173,7 @@ S_INLINE void command_pwm() {
 		return;
 	}
 	int16 m = token_expression();
-	int16 l = token_option1(0);
+	int16 l = token_option1(2000);
 	IJB_pwm(n, m, l);
 }
 S_INLINE void command_clo() {
@@ -3217,20 +3267,7 @@ S_INLINE void command_bps() {
 	IJB_bps(n, m);
 }
 S_INLINE void command_play() {
-	/*
-	Token t; Token_get(t);
-	if (t.code != TOKEN_STRING) {
-		psg_playMML(NULL);
-		token_back();
-	} else {
-		char* sp = token_skipstr();
-		if (_g.err)
-			return;
-		psg_playMML(sp);
-	}
-	token_end();
-	*/
-	char* mml = NULL;
+	char* mml[3] = { NULL, NULL, NULL };
 
 //	if (token_getChar()) { // ELSE未対策
 	int code = token_getCode(); // ELSE対策 1.2b61
@@ -3238,10 +3275,25 @@ S_INLINE void command_play() {
 	if (code != TOKEN_NULL && code != TOKEN_ELSE) {
 		int16 n = token_expression();
 		if (n >= OFFSET_RAMROM) {
-			mml = (char*)(RAM_AREA + n - OFFSET_RAMROM);
+			mml[0] = (char*)(RAM_AREA + n - OFFSET_RAMROM);
+		}
+		// MSX互換: PLAY "MML1","MML2","MML3" (最大3声)
+		for (int v = 1; v < 3; v++) {
+			code = token_getCode();
+			if (code == TOKEN_COMMA) {
+				int16 nv = token_expression();
+				IJB_ERR_CHK();
+				if (nv >= OFFSET_RAMROM) {
+					mml[v] = (char*)(RAM_AREA + nv - OFFSET_RAMROM);
+				}
+			} else {
+				token_back();
+				break;
+			}
 		}
 	}
-	psg_playMML(mml);
+	// 声1→chA、声2→chB、声3→chC (多声PLAY)
+	psg_playMML_multi(mml[0], mml[1], mml[2]);
 	token_end();
 }
 
@@ -3276,6 +3328,17 @@ S_INLINE void command_video() {
 	// 1.1b3
 	int clkdiv = token_option1(1);
 	//
+	if (video == 9 || video == 10) {
+		//VIDEO 9 - 32x24 カラー (COLOR/PAL/ATTR)、VIDEO 10 - 42x27 カラー
+		//NTSCモード専用 (HDMI/TFTは白黒描画のため他モードでは無視する)
+		if (video_output_mode == VIDEO_MODE_NTSC) {
+			_g.screen_big = 0;
+			_g.screen_invert = 0;
+			ntsc_restart_mode(video == 9 ? VMODE_IJCOLOR : VMODE_WIDETEXT);
+			screen_clear();
+		}
+		return;
+	}
 	if (video) {
 		/*
 		VIDEO 0 - off
@@ -3284,6 +3347,11 @@ S_INLINE void command_video() {
 		VIDEO 3 - big
 		VIDEO 4 - big invert
 		*/
+		//カラーモードから戻る場合はIJTEXTへ戻す (NTSCモードのみ)
+		if (video_output_mode == VIDEO_MODE_NTSC && videomode != VMODE_IJTEXT) {
+			ntsc_restart_mode(VMODE_IJTEXT);
+			screen_clear();
+		}
 		if (video < 0)
 			video = 0;
 		_g.screen_invert = (video & 1) == 0; // VIDEO2, 4 -> invert
@@ -3300,6 +3368,179 @@ S_INLINE void command_video() {
 		}
 	} else {
 		video_off(clkdiv);
+	}
+}
+
+// MSX PSG レジスタ直接操作: SOUND reg,val
+// SOUND 0-13, 0-255 — AY-3-8910のレジスタに直接書き込む
+// 例: SOUND 0,50 : SOUND 1,7 : SOUND 7,&H38 : SOUND 8,10
+S_INLINE void command_sound_psg() {
+	int16 reg = token_expression();
+	IJB_ERR_CHK();
+	int code = token_getCode();
+	int16 val = 0;
+	if (code == TOKEN_COMMA) {
+		val = token_expression();
+		IJB_ERR_CHK();
+	} else {
+		token_back();
+	}
+	code = token_getCode();
+	if (code != TOKEN_PAREN_E) {
+		token_back();
+	} // SOUND(reg,val) 括弧形式なら閉じ括弧を消費
+	token_end();
+	if (reg >= 0 && reg <= 13) {
+		sound_set_multi_mode(true, false); // 多声PSGモード (SOUND常駐: 単声PLAY/BEEPでPWMへ戻る)
+		psg_emu_write(reg, val);
+	}
+}
+
+// COLOR/COL f[,b[,c]]: 前景色/背景色/周辺色 (0-15) を設定する (NTSCカラー)
+S_INLINE void command_color() {
+	int16 color[3];
+	int i;
+	color[0] = token_expression();
+	IJB_ERR_CHK();
+	color[1] = -1;
+	color[2] = -1;
+	for (i = 1; i < 3; i++) {
+		int code = token_getCode();
+		if (code != TOKEN_COMMA)
+			break;
+		color[i] = token_expression();
+		IJB_ERR_CHK();
+	}
+	token_end();
+	if (color[0] < 0 || color[0] > 15 || color[1] > 15 || color[2] > 15) {
+		command_error(ERR_INDEX_OUT_OF_RANGE);
+		return;
+	}
+	screen_set_color(color[0], color[1], color[2]);
+}
+
+// PAL n,v / PAL RESET: パレット設定 (v=RGB332値) / 既定パレットへ戻す。PAL n,r,g,b (各0-255) も可
+S_INLINE void command_pal() {
+	int code = token_getCode();
+	if (code == TOKEN_RESET) {
+		token_end();
+		screen_reset_palette();
+		return;
+	}
+	token_back();
+	int16 color = token_expression();
+	IJB_ERR_CHK();
+	code = token_getCode();
+	if (code != TOKEN_COMMA) {
+		command_error(ERR_SYNTAX_ERROR);
+		return;
+	}
+	int16 v1 = token_expression();
+	IJB_ERR_CHK();
+	code = token_getCode();
+	if (code == TOKEN_COMMA) {
+		int16 v2 = token_expression();
+		IJB_ERR_CHK();
+		code = token_getCode();
+		if (code != TOKEN_COMMA) {
+			command_error(ERR_SYNTAX_ERROR);
+			return;
+		}
+		int16 v3 = token_expression();
+		IJB_ERR_CHK();
+		token_end();
+		if (color < 0 || color > 15 || v1 < 0 || v1 > 255 || v2 < 0 || v2 > 255 || v3 < 0 || v3 > 255) {
+			command_error(ERR_INDEX_OUT_OF_RANGE);
+			return;
+		}
+		screen_set_palette_rgb(color, v1, v2, v3);
+	} else {
+		token_back();
+		token_end();
+		if (color < 0 || color > 15 || v1 < 0 || v1 > 255) {
+			command_error(ERR_INDEX_OUT_OF_RANGE);
+			return;
+		}
+		screen_set_palette(color, v1);
+	}
+}
+
+// ATTR x,y,a: セル (x,y) の色属性 (下位4bit前景/上位4bit背景) を設定する (NTSCカラー)
+S_INLINE void command_attr() {
+	int16 x = token_expression();
+	IJB_ERR_CHK();
+	int code = token_getCode();
+	if (code != TOKEN_COMMA) {
+		command_error(ERR_SYNTAX_ERROR);
+		return;
+	}
+	int16 y = token_expression();
+	IJB_ERR_CHK();
+	code = token_getCode();
+	if (code != TOKEN_COMMA) {
+		command_error(ERR_SYNTAX_ERROR);
+		return;
+	}
+	int16 attr = token_expression();
+	IJB_ERR_CHK();
+	token_end();
+	if (x < 0 || x >= SCREEN_W || y < 0 || y >= SCREEN_H || attr < 0 || attr > 255) {
+		command_error(ERR_INDEX_OUT_OF_RANGE);
+		return;
+	}
+	screen_set_attr(x, y, attr);
+}
+
+// NEC赤外線送信: IR.OUT port,data[,repeat] / IR.OUT port,[n][,repeat]
+// data=16bit値 (上位8bit=アドレス、下位8bit=コマンド)。[n]はIR.INの受信結果配列 (6値) を再送
+S_INLINE void command_ir_out() {
+	int port = token_expression();
+	IJB_ERR_CHK();
+
+	int code = token_getCode();
+	if (code != TOKEN_COMMA) {
+		command_error(ERR_SYNTAX_ERROR);
+		return;
+	}
+
+	uint32_t frame;
+	Token t;
+	Token_get(t);
+	if (t.code == TOKEN_ARRAY) {
+		//配列形式: IR.INの受信結果を再送
+		int base = token_getArrayIndex();
+		IJB_ERR_CHK();
+
+		if (base < 0 || base + 6 >= IJB_SIZEOF_ARRAY_MAX) {
+			command_error(ERR_INDEX_OUT_OF_RANGE);
+			return;
+		}
+		uint8_t b0 = (uint8_t)(*basic_getArrayPtr(base + 0));
+		uint8_t b1 = (uint8_t)(*basic_getArrayPtr(base + 1));
+		uint8_t b2 = (uint8_t)(*basic_getArrayPtr(base + 2));
+		uint8_t b3 = (uint8_t)(*basic_getArrayPtr(base + 3));
+		if ((uint8_t)(b0 ^ b1) == 0xff) {
+			//標準NEC: 送信順 addr,~addr,cmd,~cmd
+			frame = b0 | ((uint32_t)b1 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
+		} else {
+			//NEC拡張: IR.INは表示順 (上位バイト先頭) で格納するため入れ替え
+			frame = b1 | ((uint32_t)b0 << 8) | ((uint32_t)b2 << 16) | ((uint32_t)b3 << 24);
+		}
+	} else {
+		//数値形式
+		token_back();
+		int data = token_expression();
+		IJB_ERR_CHK();
+		uint8_t addr = (uint8_t)(data >> 8);
+		uint8_t cmd  = (uint8_t)data;
+		frame = addr | ((uint32_t)(~addr & 0xff) << 8) | ((uint32_t)cmd << 16) | ((uint32_t)(~cmd & 0xff) << 24);
+	}
+
+	int repeat = token_option1(1);
+	IJB_ERR_CHK();
+
+	if (ir_nec_tx(port, frame, repeat) < 0) {
+		command_error(ERR_ILLEGAL_ARGUMENT);
 	}
 }
 S_INLINE void command_scroll() {

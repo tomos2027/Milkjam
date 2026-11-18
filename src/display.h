@@ -4,7 +4,9 @@
 
 #define CHAR_MAX_COLS 32
 #define CHAR_MAX_ROWS 24
-struct dvi_inst dvi0;
+#if !MILKJAM_USE_HSTX
+struct dvi_inst dvi0;//PicoDVIフォールバックビルドのみ (HSTXビルドではsrc/hstx_dvi.hを使用)
+#endif
 
 //ビデオ出力モード 0:DVI(HDMI)、1:NTSC(コンポジット)、2:TFT(ILI9341)、SWITCHコマンドで切り替える
 #define VIDEO_MODE_DVI 0
@@ -20,6 +22,11 @@ uint8_t lcd_enabled = 0;
 
 void video_switch_mode(uint8_t mode);//init.hで定義
 void ntsc_init();//init.hで定義
+//HDMI (DVI) バックエンドの初期化・開始・停止・状態取得 (init.hで定義、HSTX/PicoDVIを切替える)
+void dvi_backend_init();
+void dvi_backend_start();
+void dvi_backend_stop();
+int dvi_backend_active();
 //IJB_lcd (SWITCHコマンド) の実体はinit.hで定義
 
 void video_on() {
@@ -36,7 +43,7 @@ void video_on() {
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         tft_resume();//video_offからの再開 (初回の開始はvideo_switch_mode/video_output_initが行う)
     } else {
-        dvi_start(&dvi0);
+        dvi_backend_start();
     }
 }
 
@@ -47,7 +54,7 @@ void video_off(int clkdiv) {
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         tft_stop();
     } else {
-        dvi_stop(&dvi0);
+        dvi_backend_stop();
     }
 }
 
@@ -57,7 +64,7 @@ static inline int video_active() {
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         return tft_active();
     }
-    return dvi0.dvi_started;
+    return dvi_backend_active();
 }
 
 void video_waitSync(uint num) {

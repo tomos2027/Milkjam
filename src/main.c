@@ -33,6 +33,9 @@ int main() {
     //※cyw43_arch_initのファームウェアロード(~1-2秒)は画面を維持したまま実行される
     //  (NTSC割り込みが最優先のため表示は生きている。SSID未保存なら何もしない)
     iotpad_wifi_bootinit();
+    //PICO2内蔵LED: ブート時ハートビートシーケンス (HDMI=2回点滅、NTSC=3回点滅+3秒消灯→正常/エラー表示)
+    //※cyw43_arch_init成功後にLEDを操作できるため、iotpad_wifi_bootinit()の後で呼ぶ
+    heartbeat_boot_sequence();
     //Pico W: IOTPADセンサー初期化 (I2Cバスはichigojam_init内のi2c0_initでGP4/5設定済み)
     iotpad_sensors_init();
     //Pico W: IOTPAD OLED初期化 (SSD1306 128x64)
@@ -55,6 +58,7 @@ int main() {
         key_flg.insert = key_flg.bkinsert;
     }
     while (1) {
+        iotpad_wl_led_apply();//PICO2内蔵LED: timer()からのハートビート/診断希望状態を反映 (CYW43操作はメインスレッド限定)
         iotpad_wifi_tick();//Pico W: WiFi再接続・NTP開始・状態LEDの管理 (IOTPAD)
         //※async contextと同期する処理を含むためメインスレッドからのみ呼ぶ (割り込み内は禁止)
         iotpad_sensors_read();//Pico W: IOTPADセンサー定期読み取り (1秒ごと、I2C/OneWire)

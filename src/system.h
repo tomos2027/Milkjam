@@ -25,16 +25,19 @@ void record_clocks() {
     scb_orig = scb_hw->scr;
 }
 
+void psg_audio_timer_reset();//sound.hで定義 (PSG常駐タイマーの張り直し、SLEEP復帰用)
+
 void recover_from_sleep() {
     scb_hw->scr = scb_orig;//スリープ時に立ったSLEEPDEEPビットを解除
 
     //rosc再開、クロック復元(clocks_init相当)、UART再設定
     sleep_power_up();
     //クロックはビデオモード依存 (NTSC:157.5MHz、DVI/TFT:270MHz)
-    set_sys_clock_khz(video_output_mode == VIDEO_MODE_NTSC ? NTSC_CLOCK_KHZ : DVI_TIMING.bit_clk_khz, true);
+    set_sys_clock_khz(video_output_mode == VIDEO_MODE_NTSC ? NTSC_CLOCK_KHZ : VIDEO_BIT_CLK_KHZ, true);
     set_uart_bps();
     io_reconfig_pwm();//クロックが変わったのでPWMの分周比を再設定
     sd_reconfig_spi();//SD使用中ならSPI1のbaudを新しいクロックに合わせ直す
+    psg_audio_timer_reset();//PSG音声タイマーを張り直す (遅延分の追い上げでcore1が止まるのを防ぐ)
     //スリープ中はtimer()が止まるためウォッチドッグを切ってあるので、ここで再有効化する
     watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
 }

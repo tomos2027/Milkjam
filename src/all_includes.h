@@ -29,20 +29,33 @@
 #include "pico/sleep.h"
 #include "hardware/rosc.h"
 
-//PicoDVI
+//ビデオ出力バックエンド: 1=RP2350のHSTXを直接駆動 (4bpp)、0=PicoDVI (PIO) フォールバック (2bpp)
+//CMakeLists.txtのMILKJAM_USE_HSTXオプションで切替える (未定義時はフォールバック扱い)
+#ifndef MILKJAM_USE_HSTX
+#define MILKJAM_USE_HSTX 0
+#endif
+
+#if !MILKJAM_USE_HSTX
+//PicoDVI (フォールバックビルドのみ)
 #include "dvi.h"
 #include "tmds_encode.h"
 #include "common_dvi_pin_configs.h"
 #include "sprite.h"
+#endif
 
-//NTSCコンポジット出力 (rp2040_pwm_ntsc_textgraph)
-#include "rp2040_pwm_ntsc_textgraph.h"
+//NTSCコンポジット出力 (独自実装ライブラリ ntscv + 旧API互換shim)
+//※screen.hのカラー関数 (ntsc_set_color_palette等) より前にincludeする必要がある
+#include "ntsc_compat.h"
 
 #include "tusb.h"
 #include "hid.h"
 
+#if !MILKJAM_USE_HSTX
 //TV互換のCEA-861 720x480p60 (480p)。640x480p60 (VGA) はTVが認識しないことがある
 #define DVI_TIMING dvi_timing_720x480p_60hz
+#endif
+//ビデオ出力時のシステムクロック (TMDS bit clockと同じ値、DVI/TFT共通)
+#define VIDEO_BIT_CLK_KHZ 270000
 
 // for IchigoJam BASIC
 #define NO_MEMCPY
@@ -56,7 +69,9 @@
 #include "IchigoJam_BASIC/screen.h"
 #include "IchigoJam_BASIC/error.h"
 #include "IchigoJam_BASIC/ichigojam-jp.fnt.h"
-#include "IchigoJam_BASIC/psg.h"
+//PSGエミュレーション (AY-3-8910、MSX互換) + 3ch MML版psg (sound.hより前に読み込む)
+#include "psg_emu.h"
+#include "psg_mml3.h"
 #include "IchigoJam_BASIC/basic.h"
 //---
 #include "i2c.h"

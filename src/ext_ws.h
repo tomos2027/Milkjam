@@ -4,6 +4,7 @@
 #define __EXT_WS_H__
 #include "all_includes.h"
 #include "hardware/pio.h"
+#include "pico/cyw43_arch.h"//WS.LED 0 (内蔵LED) 制御用
 #include "ws2812.pio.h"
 
 //===== WS.LED送信 (PIO) =====
@@ -121,10 +122,23 @@ static void __noinline __not_in_flash_func(ws_bitbang_out) (int nled, int repeat
     }
 }
 
+//WS.LED 0: Pico 2 Wの内蔵LED (CYW43 WL_GPIO0) を制御する
+//単色LEDのため色データは配列[0]-[2] (G/R/B) のいずれかが0でなければ点灯として扱う
+//trueの間はWiFi状態表示 (iotpad_wifi_update_status_led) によるLED書換を抑止する
+static bool ws_builtin_led_override = false;
+
 //WS.LED port,n[,repeat] (4K版: ポート選択式+拡張配列変数対応)
-//port: 1-7 (OUT1-6、7=LED/GP2)、n: LED数、repeat: 送信回数
+//port: 0=内蔵LED (CYW43)、1-7 (OUT1-6、7=LED/GP2)、n: LED数、repeat: 送信回数
 //色データは配列変数[0]〜[n*3-1]から読み込む (1LEDにつき3変数、[102]-[357]の拡張領域に対応し最大119LED)
 static void __noinline ws_out(int port, int nled, int repeat) {
+    if (port == 0) {
+        bool on = (*basic_getArrayPtr(0) | *basic_getArrayPtr(1) | *basic_getArrayPtr(2)) != 0;
+        ws_builtin_led_override = on;
+        cyw43_arch_lwip_begin();
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
+        cyw43_arch_lwip_end();
+        return;
+    }
     if (port < 1 || port > 7 || nled < 1 || repeat < 1) {
         return;
     }
