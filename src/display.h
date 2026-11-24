@@ -8,11 +8,20 @@
 struct dvi_inst dvi0;//PicoDVIフォールバックビルドのみ (HSTXビルドではsrc/hstx_dvi.hを使用)
 #endif
 
-//ビデオ出力モード 0:DVI(HDMI)、1:NTSC(コンポジット)、2:TFT(ILI9341)、SWITCHコマンドで切り替える
+//ビデオ出力モード 0:DVI(HDMI)、1:NTSC(コンポジット)、2:TFT(ILI9341)、3:WEB(NTSC+ブラウザ)、SWITCHコマンドで切り替える
+//WEBモードはNTSC出力をローカル表示として継続しつつ、WiFi AP+Webサーバーを起動し
+//ブラウザにもNTSCと同じ画面を表示してキー入力も受け付ける (src/ext_web.h)
 #define VIDEO_MODE_DVI 0
 #define VIDEO_MODE_NTSC 1
 #define VIDEO_MODE_TFT 2
+#define VIDEO_MODE_WEB 3
 uint8_t video_output_mode = VIDEO_MODE_DVI;
+
+//ローカル映像バックエンドがNTSC (157.5MHzクロック) のモードか (NTSC/WEB共通)
+//クロック設定・UART/PWM/SPIの再設定・WS.LEDのbit-bangタイミング等で参照する
+static inline int video_clock_is_ntsc() {
+    return video_output_mode == VIDEO_MODE_NTSC || video_output_mode == VIDEO_MODE_WEB;
+}
 
 //TFT液晶 (GP12-16) はDVI (HDMI、GP12-19) とピンを共用するため排他で使用する:
 //LCDONコマンドで1にするとHDMI (SWITCH 0) への切替を禁止し、
@@ -32,7 +41,7 @@ int dvi_backend_active();
 void video_on() {
     SCREEN_W = CHAR_MAX_COLS >> _g.screen_big;
     SCREEN_H = CHAR_MAX_ROWS >> _g.screen_big;
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         if (ntsc_active()) {
             return;//動作中なら再初期化不要 (VIDEOコマンドの反転/拡大は内容の変更だけのため)
         }
@@ -49,7 +58,7 @@ void video_on() {
 
 //クロックの変更機能はつけない
 void video_off(int clkdiv) {
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         stop_composite();
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         tft_stop();
@@ -59,7 +68,7 @@ void video_off(int clkdiv) {
 }
 
 static inline int video_active() {
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         return ntsc_active();
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         return tft_active();
@@ -69,7 +78,7 @@ static inline int video_active() {
 
 void video_waitSync(uint num) {
     //NTSC/TFTモードでは1フレームごとのカウンタ増加を待つ (DVIモードでは何もしない)
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         for (uint i = 0; i < num; i++) {
             uint16_t count = drawcount;
             uint64_t start = time_us_64();

@@ -17,6 +17,9 @@ void iotpad_ds18b20_load_flag(); //iotpad_sensors.hで定義 (ext_wifi.hより�
 void iotpad_oled_load_font(int idx); //iotpad_oled.hで定義 (ext_wifi.hより後ろでincludeされるため前方宣言)
 void iotpad_tb_load_auto(uint16_t v); //iotpad_tb.hで定義 (ext_wifi.hより後ろでincludeされるため前方宣言)
 void iotpad_sensors_load_offsets(const uint8_t* cfg); //iotpad_sensors.hで定義 (オフセット5種の起動復元)
+void iotpad_web_ap_start(); //ext_web.hで定義 (Web表示モード用のAP+Webサーバー起動、SWITCH 3の実装)
+void iotpad_web_ap_stop(); //ext_web.hで定義 (AP+Webサーバー停止、SWITCH 0-2への切替時)
+void iotpad_web_ap_default_ssid(char* buf, int len); //ext_web.hで定義 (既定SSID "Milkjam-xxxx")
 
 //設定保存 (flash設定セクタ内レイアウト: [0]=KBD [1]=ビデオモード、[2]以降をIOTPAD用に使用)
 #define PW_CFG_SSID_OFF    2
@@ -30,6 +33,9 @@ void iotpad_sensors_load_offsets(const uint8_t* cfg); //iotpad_sensors.hで定�
 #define PW_CFG_FONT_OFF    164 // OLEDフォント番号 0-4 1byte
 #define PW_CFG_TB_AUTO_OFF 165 // ThingsBoard自動送信間隔(秒) 2byte LE (0=OFF)
 #define PW_CFG_OFFS_OFF    167 // センサーオフセット5種 (temp/hum/pres/ext1/ext2) 各float 4byte LE 計20byte
+#define PW_CFG_APSSID_OFF  189 // Web表示モード (SWITCH 3) 用AP SSID 32byte (未設定=既定"Milkjam-xxxx")
+#define PW_CFG_APPASS_OFF  221 // Web表示モード用APパスワード 64byte (未設定=既定"12345678")
+#define WEB_AP_DEFAULT_PASS "12345678" // Web表示モードの既定APパスワード (ext_web.hも参照)
 
 #define PW_WIFI_CONNECT_TIMEOUT_MS 15000 // EJ "APC"の接続待ち (DHCP含めて余裕を持たせる)
 #define PW_WIFI_STABLE_MS         3000   // 接続後にNTP同期を開始するまでの安定待ち (pad準拠)
@@ -38,6 +44,10 @@ void iotpad_sensors_load_offsets(const uint8_t* cfg); //iotpad_sensors.hで定�
 static char iotpad_ssid[PW_CFG_SSID_LEN + 1];
 static char iotpad_pass[PW_CFG_PASS_LEN + 1];
 static char iotpad_token[PW_CFG_TOKEN_LEN + 1];
+//Web表示モード (SWITCH 3) 用AP設定 (ext_web.hのAP制御が使用、EJ "SETAPSSID"/"SETAPPASS"で変更)
+static char iotpad_ap_ssid[PW_CFG_SSID_LEN + 1];
+static char iotpad_ap_pass[PW_CFG_PASS_LEN + 1];
+static bool iotpad_ap_active;      // AP動作中 (true=AP配信中、STAは切断されている)
 static int  iotpad_reconnect_min;   // 自動再接続間隔(分、0=OFF)
 static bool iotpad_wifi_started;   // cyw43_arch_init済み
 static bool iotpad_wifi_want;      // 接続を維持すべきか (SSID保存済み or 手動APC)
@@ -213,11 +223,17 @@ static void iotpad_load_settings() {
     iotpad_pass[PW_CFG_PASS_LEN] = 0;
     memcpy(iotpad_token, cfg + PW_CFG_TOKEN_OFF, PW_CFG_TOKEN_LEN);
     iotpad_token[PW_CFG_TOKEN_LEN] = 0;
+    memcpy(iotpad_ap_ssid, cfg + PW_CFG_APSSID_OFF, PW_CFG_SSID_LEN);
+    iotpad_ap_ssid[PW_CFG_SSID_LEN] = 0;
+    memcpy(iotpad_ap_pass, cfg + PW_CFG_APPASS_OFF, PW_CFG_PASS_LEN);
+    iotpad_ap_pass[PW_CFG_PASS_LEN] = 0;
     iotpad_reconnect_min = cfg[PW_CFG_RECON_OFF];
     //未設定(消去状態=0xFF)を空文字/0として扱う (wifi初期化を実行しないようにする)
     if ((uint8)iotpad_ssid[0] == 0xFF) iotpad_ssid[0] = 0;
     if ((uint8)iotpad_pass[0] == 0xFF) iotpad_pass[0] = 0;
     if ((uint8)iotpad_token[0] == 0xFF) iotpad_token[0] = 0;
+    if ((uint8)iotpad_ap_ssid[0] == 0xFF) iotpad_ap_ssid[0] = 0;
+    if ((uint8)iotpad_ap_pass[0] == 0xFF) iotpad_ap_pass[0] = 0;
     if ((uint8)iotpad_reconnect_min == 0xFF) iotpad_reconnect_min = 0;
     //DS18B20有効フラグ読み込み (IOTPAD、iotpad_sensors.h)
     iotpad_ds18b20_load_flag();
@@ -321,7 +337,10 @@ void iotpad_wifi_bootinit() {
     iotpad_dbg_str("PW: cyw43 init OK\r\n");
     iotpad_wifi_started = true;
     iotpad_wifi_update_status_led(false);//未接続=消灯
-    if (iotpad_ssid[0]) {
+    if (video_output_mode == VIDEO_MODE_WEB) {
+        //Web表示モード (SWITCH 3) で起動: 家のWiFiには繋がずAP+Webサーバーを起動する
+        iotpad_web_ap_start();
+    } else if (iotpad_ssid[0]) {
         iotpad_wifi_join_async();
     }
 }
@@ -335,6 +354,11 @@ void iotpad_wifi_tick() {
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - iotpad_wifi_tick_last_ms < 10) return; //ループから高頻度で呼ばれるため10msに間引く
     iotpad_wifi_tick_last_ms = now;
+    if (iotpad_ap_active) {
+        //AP動作中: インターネット経路がないためSTA再接続/NTP開始は行わない (Web画面転送はext_web.hのsys_timeoutで駆動)
+        iotpad_wifi_update_status_led(true);//AP配信中=内蔵LED点灯
+        return;
+    }
     bool connected = iotpad_wifi_is_connected();
     iotpad_wifi_update_status_led(connected);
     if (connected) {

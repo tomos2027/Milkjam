@@ -242,6 +242,7 @@ static void iotpad_tb_auto_send() {
 //mainループから呼ぶ (EJ "SENDTB",<秒> で設定した間隔で自動送信)
 void iotpad_tb_tick() {
     if (!tb_auto_sec) return;
+    if (iotpad_ap_active) return; //Web表示モードのAP中はインターネット不通のため送信しない (DNSタイムアウト回避)
     uint32_t now = to_ms_since_boot(get_absolute_time());
     if (now - tb_last_send_ms < tb_auto_sec * 1000UL) return;
     tb_last_send_ms = now;

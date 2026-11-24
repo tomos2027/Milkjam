@@ -20,14 +20,16 @@ BME280 (temp/humidity/pressure) / BH1750 (lux) / LTR390 (lux2/UV) / VL53L0X (dis
 
 ## Features
 
-### Display (3 modes, switch with the `SWITCH` command)
+### Display (4 modes, switch with the `SWITCH` command)
 | Mode | Output | Pins | Clock |
 |---|---|---|---|
 | `SWITCH 0` | **DVI (HDMI)** 720x480p60 (TV-compatible 480p) | GP12-19 (Pico DVI sock) | 270MHz |
 | `SWITCH 1` | **NTSC composite** | GP3 (75Ω+560pF external circuit) | 157.5MHz |
 | `SWITCH 2` | **TFT LCD ILI9341** | GP12-16 (**exclusive with HDMI**) | 270MHz |
+| `SWITCH 3` | **WEB** — NTSC output continues + the same screen is shown in a web browser via the built-in WiFi AP (with keyboard input) | GP3 + WiFi | 157.5MHz |
 
 - `SWITCH 2,1` rotates the TFT by 180°. The mode and rotation are saved to flash and restored on the next boot
+- **WEB display mode** (`SWITCH 3`): while the NTSC composite output keeps running locally, the board becomes a WiFi access point (default SSID `Milkjam-xxxx` / pass `12345678`, change with `EJ "SETAPSSID"` / `EJ "SETAPPASS"`) and serves `http://192.168.4.1`, which shows the **same screen as NTSC in a web browser** and accepts **keyboard input from the browser** (WebSocket, 20fps row-diff updates — animations during RUN stay live; monochrome/zoom VIDEO 1-4 and color VIDEO 9/10 `COLOR`/`PAL`/`ATTR` are reproduced exactly like NTSC). Switching to `SWITCH 0-2` stops the AP and reconnects to the home WiFi if configured (ThingsBoard/NTP pause while the AP is active — see MANUAL_JA.md chapter 3, Japanese)
 - **LCDON / LCDOFF commands** (new): the TFT LCD (GP12-16) shares pins with the HDMI sock (GP12-19), so they are used **exclusively**
   - `LCDON` — enable the LCD and switch to LCD mode. `SWITCH 0` (HDMI) is blocked afterwards (message only)
   - `LCDOFF` — disable the LCD (switches to HDMI if in LCD mode). `SWITCH 2` (LCD) is blocked afterwards

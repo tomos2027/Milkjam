@@ -95,5 +95,6 @@
 #include "IchigoJam_BASIC/ext_iot.h"
 #include "usr.h"
 #include "init.h"
+#include "ext_web.h" // Pico W: Web表示モード (SWITCH 3、AP+Webサーバー+画面転送+ブラウザキー入力) ※init.hより後 (ntsc_fontramを参照)
 
 #endif

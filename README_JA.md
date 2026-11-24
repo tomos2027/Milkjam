@@ -20,14 +20,16 @@ BME280 (温度/湿度/気圧) / BH1750 (照度) / LTR390 (照度2/UV) / VL53L0X 
 
 ## 主な機能
 
-### 表示 (3モード、`SWITCH`コマンドで切替)
+### 表示 (4モード、`SWITCH`コマンドで切替)
 | モード | 出力 | ピン | クロック |
 |---|---|---|---|
 | `SWITCH 0` | **DVI (HDMI)** 720x480p60 (TV互換480p) | GP12-19 (Pico DVI sock) | 270MHz |
 | `SWITCH 1` | **NTSCコンポジット** | GP3 (75Ω+560pF外部回路) | 157.5MHz |
 | `SWITCH 2` | **TFT液晶 ILI9341** | GP12-16 (**HDMIピンと排他**) | 270MHz |
+| `SWITCH 3` | **WEB** — NTSC出力継続 + WiFi APでブラウザにも同じ画面 (キー入力も可) | GP3 + WiFi | 157.5MHz |
 
 - `SWITCH 2,1` でTFTを180°回転。モードと回転設定はflashに保存され、次回起動時にそのモードで起動する
+- **WEB表示モード** (`SWITCH 3`): NTSC出力をローカル表示に継続しつつ、本体がWiFi AP (既定SSID `Milkjam-xxxx`/pass `12345678`、`EJ "SETAPSSID"`/`EJ "SETAPPASS"`で変更可) になって `http://192.168.4.1` で**NTSCと同じ画面をブラウザに表示**し、**キー入力もブラウザから**受け付ける。WebSocketで20fpsの行差分転送のためRUN中のアニメーションもライブ表示、白黒/拡大 (VIDEO 1-4) とカラー (VIDEO 9/10の`COLOR`/`PAL`/`ATTR`) をNTSCと同じ見た目で再現。`SWITCH 0-2`へ戻すとAP停止→保存済みSSIDがあれば家のWiFiへ自動再接続 (AP中はThingsBoard/NTP停止、詳細はMANUAL_JA.md 3章)
 - HDMI出力はRP2350の**HSTXペリフェラルを直接駆動**する (`src/hstx_dvi.h`、4bppグレースケール・白94%)。PicoDVI (PIO) を使う従来実装はフォールバックとして残してあり、`cmake -DMILKJAM_USE_HSTX=0` でビルドできる (2bpp・白75%)
 - **NTSC出力は独自実装ライブラリ ntscv** (`src/video/`、クリーンルーム実装、`docs/ntsc_video_spec.md` 参照)。PWM+DMA 4チャネルリングで割込み禁止に強く、**カラー表示**に対応 (下記COLOR/VIDEO 9/10)
 - **PSG多声サウンド** (AY-3-8910エミュ): core1の専用タイマーで駆動し映像と分離しているため、全表示モードでクリアな音が出る

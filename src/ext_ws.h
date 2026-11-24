@@ -97,7 +97,7 @@ static void __noinline __not_in_flash_func(wsled_send_one_signal_1575) (bool bit
 
 //PIO確保失敗時のみ使う従来方式 (割込み禁止区間がある)
 static void __noinline __not_in_flash_func(ws_bitbang_out) (int nled, int repeat) {
-    bool is_ntsc = (video_output_mode == VIDEO_MODE_NTSC);
+    bool is_ntsc = video_clock_is_ntsc(); //NTSC/WEBは157.5MHz動作 (bit-bangフォールバック時のNOP数)
     gpio_init(ws_pin);
     gpio_set_dir(ws_pin, GPIO_OUT);
     gpio_set_drive_strength(ws_pin, GPIO_DRIVE_STRENGTH_12MA);

@@ -486,7 +486,9 @@ static void iotpad_ej_exec(const char* cmd, const char* arg, char* resp, int res
         *num = st;
         *num_valid = true;
     } else if (strcmp(cmd, "APC") == 0) {
-        if (!iotpad_ssid[0]) {
+        if (iotpad_ap_active) {
+            EJ_RESP("AP Mode Active (SWITCH 0-2 to exit)");
+        } else if (!iotpad_ssid[0]) {
             EJ_RESP("SSID Not Set");
         } else if (iotpad_wifi_connect_blocking(PW_WIFI_CONNECT_TIMEOUT_MS)) {
             char ip[24];
@@ -500,8 +502,13 @@ static void iotpad_ej_exec(const char* cmd, const char* arg, char* resp, int res
         }
         *num_valid = true;
     } else if (strcmp(cmd, "APD") == 0) {
-        iotpad_wifi_disconnect();
-        EJ_RESP("WiFi Disconnected");
+        if (iotpad_ap_active) {
+            iotpad_web_ap_stop(); //AP停止→保存済みSSIDがあれば家のWiFiへ自動再接続
+            EJ_RESP("AP Stopped");
+        } else {
+            iotpad_wifi_disconnect();
+            EJ_RESP("WiFi Disconnected");
+        }
     } else if (strcmp(cmd, "RECONNECT") == 0) {
         if (*arg == 0) {
             snprintf(resp, resp_len, "Recon:%dmin", iotpad_reconnect_min);
@@ -518,6 +525,32 @@ static void iotpad_ej_exec(const char* cmd, const char* arg, char* resp, int res
         }
         *num = iotpad_reconnect_min;
         *num_valid = true;
+    }
+    //===== Web表示モード (SWITCH 3) 用AP設定 =====
+    else if (strcmp(cmd, "SETAPSSID") == 0) {
+        iotpad_set_and_save(iotpad_ap_ssid, PW_CFG_SSID_LEN, arg, PW_CFG_APSSID_OFF);
+        EJ_RESP("AP SSID Saved");
+    } else if (strcmp(cmd, "SETAPPASS") == 0) {
+        if (*arg && strlen(arg) < 8) {
+            EJ_RESP("Pass 8-64 chars");
+        } else {
+            iotpad_set_and_save(iotpad_ap_pass, PW_CFG_PASS_LEN, arg, PW_CFG_APPASS_OFF);
+            EJ_RESP("AP Pass Saved");
+        }
+    } else if (strcmp(cmd, "GETAPSSID") == 0) {
+        if (iotpad_ap_ssid[0]) {
+            EJ_RESP(iotpad_ap_ssid);
+        } else {
+            char defssid[PW_CFG_SSID_LEN + 1];
+            iotpad_web_ap_default_ssid(defssid, sizeof defssid);
+            snprintf(resp, resp_len, "%s (default)", defssid);
+        }
+    } else if (strcmp(cmd, "GETAPPASS") == 0) {
+        if (iotpad_ap_pass[0]) {
+            EJ_RESP(iotpad_ap_pass);
+        } else {
+            EJ_RESP(WEB_AP_DEFAULT_PASS " (default)");
+        }
     }
     //===== ThingsBoard送信 (フェーズ5、pad準拠) =====
     else if (strcmp(cmd, "SENDTB") == 0) {
@@ -635,6 +668,8 @@ static void iotpad_ej_exec(const char* cmd, const char* arg, char* resp, int res
             "WiFi> SETSSID/PWD/TOKEN(+HEX)\n"
             "     APC APD APS RECONNECT\n"
             "     SYNCTIME SETTIME\n"
+            "WEB> SETAPSSID SETAPPASS\n"
+            "     GETAPSSID GETAPPASS\n"
             "TB>  SENDTB[,sec] (auto)\n"
             "Q>   GETQUEUE FLUSHQUEUE CLEAR\n"
             "SYS> VER GETTOKEN OLEDFONT\n"

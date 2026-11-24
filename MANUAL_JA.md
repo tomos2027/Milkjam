@@ -92,20 +92,50 @@ WS.LED (WS2812B): ポート1-7 (OUT1-6＋LED/GP2)。PIO送信のため表示やU
 
 ## 3. 表示出力 — SWITCH / LCDON / LCDOFF
 
-### 3モード映像出力 (`SWITCH`)
+### 4モード映像出力 (`SWITCH`)
 
 | コマンド | 出力 | 接続先 | 動作クロック |
 |---|---|---|---|
 | `SWITCH 0` | DVI (HDMI) 720x480p60 (TV互換480p) | GP12-19 (Pico DVI sock) | 270MHz |
 | `SWITCH 1` | NTSCコンポジット | GP3 (75Ω直列+560pF対地GND) | 157.5MHz |
 | `SWITCH 2` | TFT液晶 ILI9341 (SPI) | GP12-16 (**HDMIと排他**) | 270MHz |
+| `SWITCH 3` | **WEB** — NTSC出力を継続しつつブラウザにも同じ画面を表示 | GP3 + WiFi AP | 157.5MHz |
 
-- `SWITCH` (引数なし) — 次のモードへトグル (DVI→NTSC→TFT→DVI。ブロック中のモードはスキップ)
+- `SWITCH` (引数なし) — 次のモードへトグル (DVI→NTSC→TFT→WEB→DVI。ブロック中のモードはスキップ)
 - `SWITCH 2,1` — TFTを180°回転 (`SWITCH 2,0` で通常向きに戻る)
 - モードと回転設定は**flashに保存**され、次回起動時にそのモードで起動する
-- NTSCモードはCPUが157.5MHz駆動のため、BASICの実行速度は270MHzモードより遅い
+- NTSC/WEBモードはCPUが157.5MHz駆動のため、BASICの実行速度は270MHzモードより遅い
 - TFTモードは差分更新のため、静止画中はSPIバスに触れない (表示はDVIと同じ白黒2色)
 - **TFTとSDカードはSPI1を共用**するため、SDON中 (SD読み書き中) は画面更新が一時停止する
+
+### WEB表示モード (`SWITCH 3`) — ブラウザで表示・入力
+
+NTSCコンポジット出力はそのままテレビに表示され続け、同時に本体がWiFiアクセスポイント
+(親機) になってWebサーバーを起動します。スマホ/PCのブラウザで `http://192.168.4.1` を開くと
+**NTSCと同じ画面**が表示され、ブラウザからのキー入力がそのままBASICに入力されます。
+
+```
+SWITCH 3            … NTSC出力継続 + AP起動 + Webサーバー起動
+                      → 画面に「WEB AP:Milkjam-xxxx http://192.168.4.1」と表示
+(スマホのWiFi設定で Milkjam-xxxx に接続、パスワードは初期値 12345678)
+(ブラウザで http://192.168.4.1 を開く)
+SWITCH 0 〜 2       … AP+Webサーバーを停止。保存済みSSIDがあれば家のWiFiへ自動再接続
+```
+
+- 画面転送はWebSocket (20fps、行差分)。`RUN`中のアニメーションもテレビと同じようにライブ表示され、
+  `INKEY()`での入力やESCキー (`Escape`) でのプログラム停止もブラウザから可能
+- 対応表示: `VIDEO 1〜4` (白黒/拡大) + `VIDEO 9`/`VIDEO 10` (カラー、`COLOR`/`PAL`/`ATTR`)。
+  拡大 (VIDEO 3/4)・画面反転・カーソル点滅 (挿入/上書きモード) もNTSCと同じ見た目で再現
+- キー対応: 文字/`Enter`/`Backspace`/`Tab`/`Esc`/矢印/`Home`/`End`/`PageUp`/`PageDown`/`Insert`/`Delete`/
+  `Ctrl`+英字 (`Ctrl+X`=行削除) / `F1〜F10` (本体のUSBキーボードと同じ機能)。スマホは画面下の
+  ボタン (ESC/矢印/ENTER) とタップで出るソフトキーボードで入力
+- WebSocket接続は**1クライアント制限** (2つ目のブラウザは503)。切断すると自動再接続します
+- AP中はインターネットに接続できないため、ThingsBoard送信/NTP時刻同期は停止します
+  (`SWITCH 0〜2` に戻すと自動再開)。`EJ "APC"` は「AP Mode Active」と表示されて実行されません
+  (APを止めるには `SWITCH 0〜2` に戻すか `EJ "APD"`)
+- AP設定は `EJ "SETAPSSID"` / `EJ "SETAPPASS"` で変更できます (flash保存、次回のAP起動から有効)
+
+### HDMI/LCDピン排他 (`LCDON` / `LCDOFF`)
 
 ### HDMI/LCDピン排他 (`LCDON` / `LCDOFF`)
 
@@ -188,9 +218,12 @@ FAT32形式のSDカード (≤32GB推奨、SDXCはFAT32で再フォーマット)
 | `EJ "SETPWD","<pass>"` | パスワード保存 |
 | `EJ "SETTOKEN","<token>"` | ThingsBoardアクセストークン保存 |
 | `EJ "SETSSIDHEX"/"SETPWDHEX"/"SETTOKENHEX","<hex>"` | 16進入力 (小文字・記号混在を正確に入力: 2桁×Nバイト) |
-| `EJ "APC"` | 接続開始 (最大15秒待機、link状態を表示) |
-| `EJ "APD"` | 切断 |
+| `EJ "APC"` | 接続開始 (最大15秒待機、link状態を表示。**AP動作中は実行不可**) |
+| `EJ "APD"` | 切断 (**AP動作中はAP停止→家のWiFiへ自動再接続**) |
 | `EJ "APS"` | 接続状態表示 (1/0) |
+| `EJ "SETAPSSID","<ssid>"` | **Web表示モード (SWITCH 3) のAP SSID保存** (未設定時は既定 `Milkjam-xxxx`) |
+| `EJ "SETAPPASS","<pass>"` | **Web表示モードのAPパスワード保存** (8〜64文字、未設定時は `12345678`) |
+| `EJ "GETAPSSID"` / `EJ "GETAPPASS"` | **Web表示モードのAP設定値表示** |
 | `EJ "RECONNECT"` / `EJ "RECONNECT",<min>` | 自動再接続間隔 (0=OFF、分) |
 | `EJ "SYNCTIME"` | NTP時刻同期 + **RTCへ自動書込** (同期済みなら即座に現在時刻を返す) |
 | `EJ "GETTIME"` | RTCからJST時刻 `YYYY-MM-DDTHH:MM:SS` |

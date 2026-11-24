@@ -268,7 +268,7 @@ uint8_t get_video_mode_config() {
     tft_flip = config[CFG_TFT_FLIP_OFF] != 0;
     lcd_enabled = config[CFG_LCD_ENABLED_OFF] != 0;
     uint8_t mode = config[1];
-    if (mode > VIDEO_MODE_TFT) {
+    if (mode > VIDEO_MODE_WEB) {
         mode = VIDEO_MODE_DVI;
     }
     //排他状態と矛盾するモードで保存されていたら代替モードで起動する (flash直接書き換え等の防御)
@@ -306,7 +306,7 @@ void save_video_mode_config(uint8_t mode) {
         flash_range_erase(offset, FLASH_SECTOR_SIZE);
         flash_range_program(offset, tflash, FLASH_SECTOR_SIZE);
         restore_interrupts(save);
-        if (video_output_mode == VIDEO_MODE_NTSC) {
+        if (video_clock_is_ntsc()) {
             //長い割り込み禁止で走査線カウンタが表示位置からずれたので、位相を合わせ直す
             ntsc_release();
             ntsc_init();
@@ -356,21 +356,23 @@ int dvi_backend_active() {
 #endif
 }
 
-//SWITCHコマンドでDVI(HDMI)/NTSC(コンポジット)/TFT(ILI9341)を切り替える
-//NTSCは専用クロック (157.5MHz)、DVI/TFTは同一クロック (270MHz) なのでTFT⇔DVIはクロック変更不要
-//NTSCとの切替では両システムの停止/再開と、クロック依存の周辺 (UART/PWM/SPI) の再設定を行う
+//SWITCHコマンドでDVI(HDMI)/NTSC(コンポジット)/TFT(ILI9341)/WEB(NTSC+ブラウザ)を切り替える
+//NTSC/WEBは専用クロック (157.5MHz)、DVI/TFTは同一クロック (270MHz) なのでTFT⇔DVIはクロック変更不要
+//NTSC/WEBとの切替では両システムの停止/再開と、クロック依存の周辺 (UART/PWM/SPI) の再設定を行う
+//WEBモードはNTSC出力をローカル表示として継続し、加えてWiFi AP+Webサーバーを起動する (ext_web.h)
 void video_switch_mode(uint8_t mode) {
     bool active = video_active();
     //現在のモードを停止する (core1はDVIのキュー待ちでアイドルになる)
     int save = save_and_disable_interrupts();
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         ntsc_release();
     } else if (video_output_mode == VIDEO_MODE_TFT) {
         tft_stop();
     } else {
         dvi_backend_stop();
     }
-    if (mode == VIDEO_MODE_NTSC) {
+    if (mode == VIDEO_MODE_NTSC || mode == VIDEO_MODE_WEB) {
+        //※ここではvideo_output_modeがまだ旧モードのため新モード(mode)で判定する
         set_sys_clock_khz(NTSC_CLOCK_KHZ, true);
     } else {
         set_sys_clock_khz(VIDEO_BIT_CLK_KHZ, true);
@@ -381,7 +383,7 @@ void video_switch_mode(uint8_t mode) {
     sd_reconfig_spi();//SD使用中ならSPI1のbaudを新しいクロックに合わせ直す
     video_output_mode = mode;
     sound_update_mode_gate();//ビデオモードに応じて音声 (PSG) の使用可否を更新
-    if (mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
         ntsc_init();
     } else if (mode == VIDEO_MODE_TFT) {
         tft_start();
@@ -393,20 +395,26 @@ void video_switch_mode(uint8_t mode) {
         }
     }
     save_video_mode_config(mode);
+    //Web表示モード: AP+Webサーバーの開始/停止 (NTSC初期化後に行うためメッセージが画面に表示される)
+    if (mode == VIDEO_MODE_WEB) {
+        iotpad_web_ap_start();
+    } else {
+        iotpad_web_ap_stop();
+    }
     if (!active) {
         video_off(0);//切替前に映像停止状態だったら停止を維持
     }
 }
 
 //SWITCHコマンドの実体 (basic.hのcommand_lcdから呼ばれる)
-//SWITCH 0:DVI(HDMI)、SWITCH 1:NTSC(コンポジット)、SWITCH 2:TFT(ILI9341)、SWITCH (引数なし): 次のモードへ
+//SWITCH 0:DVI(HDMI)、SWITCH 1:NTSC(コンポジット)、SWITCH 2:TFT(ILI9341)、SWITCH 3:WEB(NTSC+ブラウザ)、SWITCH (引数なし): 次のモードへ
 //flip: -1=変更なし (省略/F10トグル時。設定は維持される)、0:TFT通常向き、1:TFT180°回転 (0/1指定時はflashに保存)
 //
 //TFT液晶 (GP12-16) はDVI (HDMI sock、GP12-19) とピンを共用するため排他で使用する (安全担保):
 //  LCDON中 (lcd_enabled=1) はSWITCH 0 (HDMI) をブロック、LCDOFF中 (lcd_enabled=0) はSWITCH 2 (LCD) をブロック
 //  NTSC (GP3) は排他ピンではないため常に切替可能
 void IJB_lcd(uint mode, int flip) {
-    if (mode > VIDEO_MODE_TFT) {
+    if (mode > VIDEO_MODE_WEB) {
         mode = VIDEO_MODE_DVI;
     }
     //HDMI/LCDピン排他のガード: 禁止されたモードへの切替はメッセージを表示して拒否する (プログラムは継続)
@@ -432,12 +440,12 @@ void IJB_lcd(uint mode, int flip) {
     video_switch_mode(mode);//TFTモードへの切替時はtft_startで新しいMADCTL (180°設定) が反映される
 }
 
-//SWITCH (引数なし) で次に切り替えるモードを返す (DVI→NTSC→TFT→DVIの順)
-//LCDON/LCDOFFの排他でブロックされているモードはスキップする (NTSCは常に使用可能)
+//SWITCH (引数なし) で次に切り替えるモードを返す (DVI→NTSC→TFT→WEB→DVIの順)
+//LCDON/LCDOFFの排他でブロックされているモードはスキップする (NTSC/WEBは常に使用可能)
 int video_next_mode() {
     uint8_t mode = _g.display_mode;
-    for (int i = 0; i < 2; i++) {
-        mode = mode >= VIDEO_MODE_TFT ? VIDEO_MODE_DVI : mode + 1;
+    for (int i = 0; i < 3; i++) {
+        mode = mode >= VIDEO_MODE_WEB ? VIDEO_MODE_DVI : mode + 1;
         if (mode == VIDEO_MODE_DVI && lcd_enabled) {
             continue;//LCDON中はHDMI不可
         }
@@ -446,7 +454,7 @@ int video_next_mode() {
         }
         return mode;
     }
-    return VIDEO_MODE_NTSC;//ブロックされるのは高々1モードのため通常2周目はない (防御)
+    return VIDEO_MODE_NTSC;//ブロックされるのは高々2モードのため通常3周目はない (防御)
 }
 
 //LCDON/LCDOFFコマンドの実体 (basic.hのディスパッチから呼ばれる)
@@ -511,10 +519,12 @@ static bool heartbeat_has_error() {
 //ブート時ハートビートシーケンス (iotpad_wifi_bootinit()の後、cyw43_arch_init成功後に呼ぶ)
 //HDMI/DVI/TFTで起動: 2回点滅 → ハートビートへ
 //NTSCで起動: 3回点滅 → 3秒消灯 → 正常ならハートビートへ、エラーなら常時点灯
+//WEBで起動: 4回点滅 → ハートビートへ (AP起動はiotpad_wifi_bootinit内)
 void heartbeat_boot_sequence() {
     heartbeat_wdt_reset = watchdog_caused_reboot();//リセット原因を記録
     heartbeat_boot_active = true;//シーケンス中はtimer()のハートビートを止める
-    int blinks = (video_output_mode == VIDEO_MODE_NTSC) ? 3 : 2;
+    int blinks = video_output_mode == VIDEO_MODE_NTSC ? 3
+               : video_output_mode == VIDEO_MODE_WEB ? 4 : 2;
     for (int i = 0; i < blinks; i++) {
         iotpad_wl_led_set(true);
         iotpad_wl_led_apply();//メインスレッドなので即時反映できる
@@ -539,8 +549,9 @@ bool timer(repeating_timer_t* rt) {
     psg_tick();
     set_tone();
     if (video_active()) {
-        if (video_output_mode == VIDEO_MODE_NTSC) {
+        if (video_clock_is_ntsc()) {
             //NTSC整合性チェック (診断用): メモリ破壊を検知したらエラー番号を画面に表示し、以降の通常画面更新を止める
+            //(WEBモードもNTSC出力をローカル表示として使うため同一経路。ブラウザへの転送はext_web.hがTVRAMの差分で行う)
             uint32_t err = 0;
             if (Fontp != ntsc_fontram) err |= 1;//フォントポインタ破壊
             if (vram != (uint8*)RAM_VRAM) err |= 2;//VRAMポインタ破壊
@@ -729,8 +740,8 @@ void pico_init() {
 
     vreg_set_voltage(VREG_VSEL);
     sleep_ms(10);//電圧が安定してからクロックを上げる (mlorenzatiのhello_dviデモと同じ)
-    // Run system at TMDS bit clock (DVI/TFT) or NTSC clock
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    // Run system at TMDS bit clock (DVI/TFT) or NTSC clock (NTSC/WEB)
+    if (video_clock_is_ntsc()) {
         set_sys_clock_khz(NTSC_CLOCK_KHZ, true);
     } else {
         set_sys_clock_khz(VIDEO_BIT_CLK_KHZ, true);
@@ -813,7 +824,7 @@ void video_output_init() {
 #if MILKJAM_USE_HSTX
     hstx_core1_launch();
 #endif
-    if (video_output_mode == VIDEO_MODE_NTSC) {
+    if (video_clock_is_ntsc()) {
 #if !MILKJAM_USE_HSTX
         picodvi_boot_dvi = false;
         multicore_launch_core1(core1_psg_dvi_entry);//音声+FIFO待機 (DVI開始時に起床)

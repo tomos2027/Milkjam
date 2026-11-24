@@ -38,6 +38,7 @@ extern uint8_t video_output_mode;
 #define VIDEO_MODE_DVI 0
 #define VIDEO_MODE_NTSC 1
 #define VIDEO_MODE_TFT 2
+#define VIDEO_MODE_WEB 3
 #endif
 
 //void wait(int n);
@@ -3330,8 +3331,8 @@ S_INLINE void command_video() {
 	//
 	if (video == 9 || video == 10) {
 		//VIDEO 9 - 32x24 カラー (COLOR/PAL/ATTR)、VIDEO 10 - 42x27 カラー
-		//NTSCモード専用 (HDMI/TFTは白黒描画のため他モードでは無視する)
-		if (video_output_mode == VIDEO_MODE_NTSC) {
+		//NTSC/WEBモード専用 (HDMI/TFTは白黒描画のため他モードでは無視する。WEBもNTSC出力のためカラー可)
+		if (video_output_mode == VIDEO_MODE_NTSC || video_output_mode == VIDEO_MODE_WEB) {
 			_g.screen_big = 0;
 			_g.screen_invert = 0;
 			ntsc_restart_mode(video == 9 ? VMODE_IJCOLOR : VMODE_WIDETEXT);
@@ -3347,8 +3348,9 @@ S_INLINE void command_video() {
 		VIDEO 3 - big
 		VIDEO 4 - big invert
 		*/
-		//カラーモードから戻る場合はIJTEXTへ戻す (NTSCモードのみ)
-		if (video_output_mode == VIDEO_MODE_NTSC && videomode != VMODE_IJTEXT) {
+		//カラーモードから戻る場合はIJTEXTへ戻す (NTSC/WEBモードのみ)
+		if ((video_output_mode == VIDEO_MODE_NTSC || video_output_mode == VIDEO_MODE_WEB)
+			&& videomode != VMODE_IJTEXT) {
 			ntsc_restart_mode(VMODE_IJTEXT);
 			screen_clear();
 		}
