@@ -467,14 +467,18 @@ static void web_push_tick(void* arg) {
 }
 
 //メインループから呼ぶ (main.c): 画面転送タイマー鎖の自己修復。
-//sys_timeoutの再登録はpush tickの先頭で行うが、一度でも欠けると転送が永久停止するため、
-//200ms以上pushが動いていなければメインスレッドから再登録する (armedフラグで二重登録防止)
+//sys_timeoutの再登録はpush tickの先頭で行うが、再登録に一度でも失敗/欠落すると
+//armedフラグが1のまま転送だけが永久停止する。そこでarmedフラグは信頼せず、
+//200ms以上pushが動いていなければsys_untimeout→sys_timeoutのペアで無条件に再登録する
+//(残留/二重エントリもここで清掃される)
 void iotpad_web_tick() {
-    if (!web_server_running || web_push_armed) return;
+    if (!web_server_running) return;
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - web_last_push_ms < 200) return;
+    if (now - web_last_push_ms < 200) return; //鎖が生きている (tickが最終動作時刻を更新し続ける)
     web_push_armed = 1;
+    web_last_push_ms = now;
     cyw43_arch_lwip_begin();
+    sys_untimeout(web_push_tick, NULL);
     sys_timeout(WEB_PUSH_INTERVAL_MS, web_push_tick, NULL);
     cyw43_arch_lwip_end();
     iotpad_dbg_str("WEB: push rearm\n");
@@ -532,20 +536,25 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
-"var rd=0,rt=0,ot=0,om=0;"
+"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0;"
 "function conn(){st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
 "ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
 "ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
 "setTimeout(function(){if(g===rt)conn()},Math.min(8000,1500*rd))};"
-"ws.onmessage=function(e){om=Date.now();var b=new Uint8Array(e.data),t=b[0];"
+"ws.onmessage=function(e){om=Date.now();rx++;try{var b=new Uint8Array(e.data),t=b[0];"
 "if(t==1){F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
 "else if(t==2){var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
 "if(rsz||!V)sz();dr=1}"
 "else if(t==3){P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
-"else if(t==4){var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}}}"
+"else if(t==4){var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}"
+"}catch(er){st.textContent='rx err'}}}"
 "conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}"
-"if(ws&&ws.readyState==1&&om===0&&Date.now()-ot>3000){st.textContent='no data - reconnect';rec()}"
+"if(ws&&ws.readyState==1){"
+"if(rx>0&&!pasting)st.textContent='connected rx='+rx;"
+"var need=(om===0&&Date.now()-ot>2000)||((!V||!P)&&rx>0&&Date.now()-lastsync>2500);"
+"if(need&&Date.now()-lastsync>2500){lastsync=Date.now();st.textContent='resync...';"
+"ws.send(new Uint8Array([255]))}}"
 "},33);"
 "var KM={Enter:[10],Backspace:[8],Tab:[9],Escape:[27],ArrowLeft:[28],ArrowRight:[29],"
 "ArrowUp:[30],ArrowDown:[31],Home:[18],End:[23],PageUp:[19],PageDown:[20],Insert:[17],Delete:[127]};"
@@ -728,7 +737,24 @@ static void web_ws_parse(struct tcp_pcb* pcb) {
         } else if (opcode == 0x1) { //テキストフレーム = コードペースト (かな変換/ESC停止をバイパス)
             web_keys_in(pay, len, 1);
         } else if (opcode == 0x2 || opcode == 0x0) { //バイナリ/継続 = キー入力
-            web_keys_in(pay, len, 0);
+            if (len >= 1 && pay[0] == 0xFF) {
+                //再同期要求: 差分ベースを全リセットし、次のpush tickから
+                //フォント/モード/パレット/全行をフル再送する (0xFFはキー入力では使わない)
+                web_sent_valid = 0;
+                web_font_off = 0;
+                web_client_cm = 0xFF;
+                web_client_w = 0;
+                web_client_h = 0;
+                web_client_mag = 0;
+                web_client_inv = 0;
+                web_client_xm = 0;
+                web_client_cx = 0;
+                web_client_cy = 0;
+                web_client_con = 0;
+                iotpad_dbg_str("WEB: resync\n");
+            } else {
+                web_keys_in(pay, len, 0);
+            }
         }
         pos += hl + len;
     }
@@ -927,9 +953,9 @@ void iotpad_web_ap_start() {
 void iotpad_web_ap_stop() {
     if (!web_server_running) return;
     iotpad_dbg_str("WEB: ap stop\n");
-    sys_untimeout(web_push_tick, NULL);
-    web_push_armed = 0;
     cyw43_arch_lwip_begin();
+    sys_untimeout(web_push_tick, NULL); //タイマーリスト操作はロック内で行う (メインスレッドからの競合防止)
+    web_push_armed = 0;
     if (web_conn_pcb) {
         tcp_abort(web_conn_pcb);
         web_conn_pcb = NULL;
