@@ -315,7 +315,7 @@ static void web_push_tick(void* arg) {
         pay[2] = len & 0xFF;
         pay[3] = len >> 8;
         memcpy(pay + 4, ntsc_fontram + web_font_off, len);
-        if (!web_ws_tx(pcb, 1, 4 + len)) return;
+        if (!web_ws_tx(pcb, 2, 4 + len)) return; //opcode 2=バイナリ (テキスト1はUTF-8検証で切断される)
         memcpy(web_sent_font + web_font_off, ntsc_fontram + web_font_off, len);
         web_font_off += len;
     }
@@ -358,7 +358,7 @@ static void web_push_tick(void* arg) {
     if (memcmp(screen_pal, web_sent_pal, 16) != 0) {
         if (tcp_sndbuf(pcb) < 4 + 16) return;
         memcpy(web_wsbuf + 4, screen_pal, 16);
-        if (!web_ws_tx(pcb, 3, 16)) return;
+        if (!web_ws_tx(pcb, 2, 16)) return; //opcode 2=バイナリ (3-7は予約オペコードで切断される)
         memcpy(web_sent_pal, screen_pal, 16);
     }
     // 4) 行差分 ([4][y][w][文字w][属性w]、vram+screen_attrを直接送る)
@@ -375,7 +375,7 @@ static void web_push_tick(void* arg) {
         pay[1] = w;
         memcpy(pay + 2, cl, w);
         memcpy(pay + 2 + w, al, w);
-        if (!web_ws_tx(pcb, 4, 2 + 2 * w)) return;
+        if (!web_ws_tx(pcb, 2, 2 + 2 * w)) return; //opcode 2=バイナリ (4は予約オペコード)
         memcpy(web_sent_char + y * w, cl, w);
         memcpy(web_sent_attr + y * w, al, w);
     }
@@ -390,7 +390,7 @@ static void web_push_tick(void* arg) {
         pay[2] = 512 & 0xFF;
         pay[3] = 512 >> 8;
         memcpy(pay + 4, ntsc_fontram + off, 512);
-        if (!web_ws_tx(pcb, 1, 4 + 512)) return;
+        if (!web_ws_tx(pcb, 2, 4 + 512)) return; //opcode 2=バイナリ
         memcpy(web_sent_font + off, ntsc_fontram + off, 512);
     }
 }
