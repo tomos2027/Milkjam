@@ -473,6 +473,7 @@ static const char WEB_PAGE[] =
 "<button onmousedown='kp([29])'>&#8594;</button><button onmousedown='kp([10])'>ENTER</button></div>"
 "<div><button onmousedown='szm(-1)'>－</button><button onmousedown='szm(1)'>＋</button>"
 "<button onmousedown='szf()'>FIT</button><button onmousedown='popen()'>PASTE</button></div>"
+"<div><button onmousedown='rec()'>再接続</button><button onmousedown='location.reload()'>再読み込み</button></div>"
 "<div id=p style='display:none;position:fixed;left:0;top:0;width:100%;height:100%;"
 "background:rgba(0,0,0,.85);z-index:9;padding-top:20px'>"
 "<textarea id=t rows=8 style='width:92%;background:#111;color:#ccc;border:1px solid #555;"
@@ -508,10 +509,12 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
+"var rd=0,rt=0;"
 "function conn(){st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
-"ws.onopen=function(){st.textContent='connected';st.style.color='#6c6'};"
-"ws.onclose=function(){ws=null;st.textContent='retry...';setTimeout(conn,1500)};"
+"ws.onopen=function(){rd=0;st.textContent='connected';st.style.color='#6c6'};"
+"ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
+"setTimeout(function(){if(g===rt)conn()},Math.min(8000,1500*rd))};"
 "ws.onmessage=function(e){var b=new Uint8Array(e.data),t=b[0];"
 "if(t==1){F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
 "else if(t==2){var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
@@ -525,6 +528,7 @@ static const char WEB_PAGE[] =
 "F5:[24,82,85,78,10],F6:[24,63,70,82,69,69,40,41,10],F7:[24,79,85,84,48,10],"
 "F8:[24,86,73,68,69,79,49,10],F9:[24,70,73,76,69,83],F10:[24,83,87,73,84,67,72,10]};"
 "function kp(c){if(ws&&ws.readyState==1)ws.send(new Uint8Array(c))}"
+"function rec(){rt++;pasting=0;if(ws){ws.onclose=function(){};try{ws.close()}catch(e){};ws=null}rd=0;conn()}"
 "document.addEventListener('keydown',function(e){if(pv.style.display=='block')return;"
 "if(!ws||ws.readyState!=1)return;var k=FK[e.key]||KM[e.key];"
 "if(!k&&e.key.length==1){var c=e.key.charCodeAt(0);"
@@ -796,17 +800,10 @@ static err_t web_accept(void* arg, struct tcp_pcb* pcb, err_t err) {
     if (err != ERR_OK || !pcb) return err;
     iotpad_dbg_str("WEB: accept\n");
     if (web_conn_pcb) {
-        if (web_conn_ws) {
-            //WebSocket使用中 → 新規接続は503で拒否 (2つ目のブラウザ)
-            iotpad_dbg_str("WEB: busy\n");
-            static const char busy[] = "HTTP/1.1 503 Busy\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-            if (tcp_write(pcb, busy, sizeof busy - 1, TCP_WRITE_FLAG_COPY) == ERR_OK) {
-                tcp_output(pcb);
-            }
-            if (tcp_close(pcb) != ERR_OK) tcp_abort(pcb);
-            return ERR_OK;
-        }
-        //HTTPページ送信中 → 新しい接続を優先 (ブラウザの並列接続対策)
+        //既存接続がある場合は中断して新しい接続を優先する (最新接続優先)。
+        //ブラウザの再読み込みでは旧WS接続のFIN処理より先に新しいページGETが届くため、
+        //旧接続を503で拒否すると再読み込み後に画面が表示されなくなる
+        iotpad_dbg_str("WEB: replace\n");
         struct tcp_pcb* old = web_conn_pcb;
         web_conn_pcb = NULL;
         web_reset_conn_state();
