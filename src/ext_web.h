@@ -45,7 +45,10 @@ static int web_font_off;               // WS初期化: フォント送信済み�
 static uint8_t web_client_cm, web_client_w, web_client_h, web_client_mag; // クライアントが持つ状態
 static uint8_t web_client_inv, web_client_xm, web_client_cx, web_client_cy, web_client_con;
 static uint32_t web_last_ack_ms;
-static uint8_t web_wsbuf[4 + WEB_WS_PAYLOAD_MAX]; // WS送信組み立て (先頭4バイトはヘッダ置き場)
+static uint32_t web_last_ping_ms;
+//WS送信組み立てバッファ (先頭4バイトはWSヘッダ置き場)。
+//行差分を1フレームにまとめるため全画面分 (ワイド27行×87B+ヘッダ≈2351、sndbuf上限2144で分割) を格納できるサイズ
+static uint8_t web_wsbuf[2200];
 
 //送信済み差分ベース (クライアントと共有している内容の控え)
 //画面データはvram/screen_attr (最大32x24) を直接読む。拡大 (VIDEO 3/4) はTVRAMでは
@@ -219,6 +222,17 @@ static void web_dhcp_recv(void* arg, struct udp_pcb* pcb, struct pbuf* p, const 
     //RELEASE/INFORM等は無視
 }
 
+//===== 診断ログ (UART GP0 115200bps、1秒に1回まで間引く) =====
+static uint32_t web_diag_last_ms;
+static void web_diag(const char* msg, int v1, int v2) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - web_diag_last_ms < 1000) return;
+    web_diag_last_ms = now;
+    char buf[96];
+    snprintf(buf, sizeof buf, msg, v1, v2);
+    iotpad_dbg_str(buf);
+}
+
 //===== WebSocket送受信 =====
 //WSバイナリフレーム送信。ペイロードはweb_wsbuf+4に組み立てておく。
 //ヘッダ+本体を1回のtcp_writeで送る (2回に分けると本体側のtcp_writeが失敗したとき
@@ -237,8 +251,18 @@ static int web_ws_tx(struct tcp_pcb* pcb, int opcode, int len) {
         web_wsbuf[3] = len & 0xFF;
         hl = 4; //本体はweb_wsbuf+4にそのまま連結
     }
-    if (tcp_sndbuf(pcb) < hl + len) return 0;
-    if (tcp_write(pcb, web_wsbuf, hl + len, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
+    if (hl + len > (int)sizeof web_wsbuf) {
+        web_diag("WEB: tx ovf op=%d len=%d\n", opcode, len);
+        return 0;
+    }
+    if (tcp_sndbuf(pcb) < hl + len) {
+        web_diag("WEB: tx full snd=%d qlen=%d\n", tcp_sndbuf(pcb), pcb->snd_queuelen);
+        return 0;
+    }
+    if (tcp_write(pcb, web_wsbuf, hl + len, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+        web_diag("WEB: tx err snd=%d qlen=%d\n", tcp_sndbuf(pcb), pcb->snd_queuelen);
+        return 0;
+    }
     tcp_output(pcb);
     return 1;
 }
@@ -276,6 +300,7 @@ static void web_reset_conn_state() {
 }
 
 static void web_conn_close(struct tcp_pcb* pcb) {
+    iotpad_dbg_str("WEB: close\n");
     if (web_conn_pcb == pcb) {
         web_conn_pcb = NULL;
     }
@@ -300,6 +325,13 @@ static void web_push_tick(void* arg) {
     struct tcp_pcb* pcb = web_conn_pcb;
     if (!pcb || !web_conn_ws || web_conn_closing) return;
     if (!ntsc_active()) return; //VIDEO 0等で映像停止中は転送しない
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    //WS ping (10秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
+    //30秒アイドル監視の誤発動を防ぐ (pongはブラウザが自動返信)
+    if (now - web_last_ping_ms > 10000) {
+        web_last_ping_ms = now;
+        web_ws_tx(pcb, 0x9, 0);
+    }
     // 描画モード (NTSCのvideomodeに追従): 0=単色 (拡大あり) 1=カラー32x24 2=カラー42x27
     int cm = videomode == VMODE_IJCOLOR ? 1 : videomode == VMODE_WIDETEXT ? 2 : 0;
     int w = SCREEN_W;
@@ -366,26 +398,48 @@ static void web_push_tick(void* arg) {
         if (!web_ws_tx(pcb, 2, 17)) return; //opcode 2=バイナリ (3-7は予約オペコードで切断される)
         memcpy(web_sent_pal, screen_pal, 16);
     }
-    // 4) 行差分 ([4][y][w][文字w][属性w]、vram+screen_attrを直接送る)
-    for (int y = 0; y < h; y++) {
+    // 4) 行差分 (全差分行を1フレームにまとめて送る: 小フレームの連続送信は
+    //    送信キュー/ACK粒度との絡みで送信が停滞するため)
+    //メッセージ形式: [4][行数n][(y)(w)(文字w)(属性w)]×n — sndbufに収まる分だけ送り、残りは次周期
+    int batch = 0;
+    int cap = tcp_sndbuf(pcb) - 6; //WSヘッダ+行数バイト分の余裕
+    int y = 0;
+    for (; y < h; y++) {
         uint8* cl = vram + y * w;
         uint8* al = screen_attr + y * w;
         if (web_sent_valid && memcmp(cl, web_sent_char + y * w, w) == 0
             && memcmp(al, web_sent_attr + y * w, w) == 0) {
             continue;
         }
-        if (tcp_sndbuf(pcb) < 4 + 3 + 2 * w) return; //次の周期で続きを送る
-        uint8* pay = web_wsbuf + 4;
-        pay[0] = 4; //種別=行
-        pay[1] = y;
-        pay[2] = w;
-        memcpy(pay + 3, cl, w);
-        memcpy(pay + 3 + w, al, w);
-        if (!web_ws_tx(pcb, 2, 3 + 2 * w)) return; //opcode 2=バイナリ
-        memcpy(web_sent_char + y * w, cl, w);
+        if (cap < 2 + 2 * w) break; //この周期で送れるのはここまで
+        uint8* pay = web_wsbuf + 6 + batch * (2 + 2 * w);
+        pay[0] = y;
+        pay[1] = w;
+        memcpy(pay + 2, cl, w);
+        memcpy(pay + 2 + w, al, w);
+        memcpy(web_sent_char + y * w, cl, w); //送信分だけ差分ベースへ反映
         memcpy(web_sent_attr + y * w, al, w);
+        batch++;
+        cap -= 2 + 2 * w;
     }
-    web_sent_valid = 1;
+    if (batch > 0) {
+        web_wsbuf[4] = 4;  //種別=行
+        web_wsbuf[5] = batch;
+        web_ws_tx(pcb, 2, 2 + batch * (2 + 2 * w)); //opcode 2=バイナリ
+    }
+    if (y == h) {
+        web_sent_valid = 1; //全行を処理しきった
+    }
+    //状態診断ログ (2秒ごと): 転送が止まっているときの原因特定用 (UART GP0 115200bps)
+    static uint32_t web_diag_tick_ms;
+    if (now - web_diag_tick_ms > 2000) {
+        web_diag_tick_ms = now;
+        char buf[112];
+        snprintf(buf, sizeof buf, "WEB: tick fo=%d sv=%d snd=%d ql=%d ack=%dms\n",
+            (int)web_font_off, web_sent_valid, (int)tcp_sndbuf(pcb), (int)pcb->snd_queuelen,
+            (int)(now - web_last_ack_ms));
+        iotpad_dbg_str(buf);
+    }
     // 5) フォント差分 (PCG: POKE #700-#7FFでの書き換えを検知して再送)
     for (int off = 0; off < 2048; off += 512) {
         if (memcmp(ntsc_fontram + off, web_sent_font + off, 512) == 0) continue;
@@ -447,7 +501,7 @@ static const char WEB_PAGE[] =
 "else if(t==2){var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
 "if(rsz||!V)sz();dr=1}"
 "else if(t==3){P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
-"else if(t==4){var y=b[1],w=b[2];V.set(b.subarray(3,3+w),y*W);A.set(b.subarray(3+w,3+w+w),y*W);dr=1}}}"
+"else if(t==4){var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}}}"
 "conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}},33);"
 "var KM={Enter:[10],Backspace:[8],Tab:[9],Escape:[27],ArrowLeft:[28],ArrowRight:[29],"
 "ArrowUp:[30],ArrowDown:[31],Home:[18],End:[23],PageUp:[19],PageDown:[20],Insert:[17],Delete:[127]};"
@@ -678,6 +732,7 @@ static err_t web_sent_cb(void* arg, struct tcp_pcb* pcb, u16_t len) {
 
 static void web_err(void* arg, err_t err) {
     (void)arg; (void)err;
+    iotpad_dbg_str("WEB: err\n");
     //tcp_errにはpcbが渡されないため、単一接続前提で現在の接続を破棄扱いにする
     //(pcbはlwIPが解放済みのためここでは触らない)
     web_conn_pcb = NULL;
@@ -689,6 +744,7 @@ static err_t web_poll(void* arg, struct tcp_pcb* pcb) {
     if (pcb != web_conn_pcb) return ERR_OK;
     if (web_conn_closing
         || (web_last_ack_ms && to_ms_since_boot(get_absolute_time()) - web_last_ack_ms > WEB_IDLE_TIMEOUT_MS)) {
+        iotpad_dbg_str("WEB: poll abort\n");
         web_conn_pcb = NULL;
         web_reset_conn_state();
         tcp_abort(pcb);
@@ -700,9 +756,11 @@ static err_t web_poll(void* arg, struct tcp_pcb* pcb) {
 static err_t web_accept(void* arg, struct tcp_pcb* pcb, err_t err) {
     (void)arg;
     if (err != ERR_OK || !pcb) return err;
+    iotpad_dbg_str("WEB: accept\n");
     if (web_conn_pcb) {
         if (web_conn_ws) {
             //WebSocket使用中 → 新規接続は503で拒否 (2つ目のブラウザ)
+            iotpad_dbg_str("WEB: busy\n");
             static const char busy[] = "HTTP/1.1 503 Busy\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             if (tcp_write(pcb, busy, sizeof busy - 1, TCP_WRITE_FLAG_COPY) == ERR_OK) {
                 tcp_output(pcb);
