@@ -220,23 +220,25 @@ static void web_dhcp_recv(void* arg, struct udp_pcb* pcb, struct pbuf* p, const 
 }
 
 //===== WebSocket送受信 =====
-//ペイロードはweb_wsbuf+4に組み立てておく。送信できたら1を返す
+//WSバイナリフレーム送信。ペイロードはweb_wsbuf+4に組み立てておく。
+//ヘッダ+本体を1回のtcp_writeで送る (2回に分けると本体側のtcp_writeが失敗したとき
+//孤立ヘッダがストリームに混入してフレーム境界が壊れるため)。送信できたら1を返す
 static int web_ws_tx(struct tcp_pcb* pcb, int opcode, int len) {
-    uint8_t h[4];
     int hl;
-    h[0] = 0x80 | opcode;
     if (len < 126) {
-        h[1] = len;
+        web_wsbuf[0] = 0x80 | opcode;
+        web_wsbuf[1] = len;
         hl = 2;
+        if (len) memmove(web_wsbuf + 2, web_wsbuf + 4, len); //ヘッダ直後に本体を連結
     } else {
-        h[1] = 126;
-        h[2] = len >> 8;
-        h[3] = len & 0xFF;
-        hl = 4;
+        web_wsbuf[0] = 0x80 | opcode;
+        web_wsbuf[1] = 126;
+        web_wsbuf[2] = len >> 8;
+        web_wsbuf[3] = len & 0xFF;
+        hl = 4; //本体はweb_wsbuf+4にそのまま連結
     }
     if (tcp_sndbuf(pcb) < hl + len) return 0;
-    if (tcp_write(pcb, h, hl, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
-    if (len && tcp_write(pcb, web_wsbuf + 4, len, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
+    if (tcp_write(pcb, web_wsbuf, hl + len, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
     tcp_output(pcb);
     return 1;
 }
@@ -722,6 +724,7 @@ static err_t web_accept(void* arg, struct tcp_pcb* pcb, err_t err) {
     tcp_sent(pcb, web_sent_cb);
     tcp_err(pcb, web_err);
     tcp_poll(pcb, web_poll, 8); //4秒ごと: 送信詰まりの回収
+    tcp_nagle_disable(pcb); //小フレーム (画面差分/キー) の即時送信 (Nagle/遅延ACKの送信滞留回避)
     return ERR_OK;
 }
 
