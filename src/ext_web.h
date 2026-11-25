@@ -46,6 +46,7 @@ static uint8_t web_client_cm, web_client_w, web_client_h, web_client_mag; // ク
 static uint8_t web_client_inv, web_client_xm, web_client_cx, web_client_cy, web_client_con;
 static uint32_t web_last_ack_ms;
 static uint32_t web_last_ping_ms;
+static uint32_t web_tx_count; //WS送信フレーム数 (クライアントの診断表示用、統計フレームで通知)
 //画面転送タイマー鎖の自己修復用 (iotpad_web_tickがメインループから監視)
 //sys_timeoutの再登録が一度でも欠けると転送が永久停止するため、armedフラグと最終動作時刻を管理する
 static volatile uint8_t web_push_armed;
@@ -268,6 +269,7 @@ static int web_ws_tx(struct tcp_pcb* pcb, int opcode, int len) {
         return 0;
     }
     tcp_output(pcb);
+    web_tx_count++;
     return 1;
 }
 
@@ -351,6 +353,17 @@ static void web_push_tick(void* arg) {
     if (now - web_last_ping_ms > 10000) {
         web_last_ping_ms = now;
         web_ws_tx(pcb, 0x9, 0);
+    }
+    //送信統計フレーム (1秒ごと): [5][送信フレーム数2byte] — クライアントの診断表示 (tx=N) 用。
+    //push tickが動いていれば転送が詰まっていても1秒ごとに届くため、txの増加/停止で
+    //「tick死」「転送詰まり」「クライアント解析問題」をブラウザだけで判別できる
+    static uint32_t web_stat_ms;
+    if (now - web_stat_ms > 1000) {
+        web_stat_ms = now;
+        web_wsbuf[4] = 5; //種別=統計
+        web_wsbuf[5] = web_tx_count & 0xFF;
+        web_wsbuf[6] = (web_tx_count >> 8) & 0xFF;
+        web_ws_tx(pcb, 2, 3);
     }
     // 描画モード (NTSCのvideomodeに追従): 0=単色 (拡大あり) 1=カラー32x24 2=カラー42x27
     int cm = videomode == VMODE_IJCOLOR ? 1 : videomode == VMODE_WIDETEXT ? 2 : 0;
@@ -536,23 +549,26 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
-"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0;"
+"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0,f1=0,m1=0,p1=0,r1=0,ec=0,exm='',txc=-1,stupd=0;"
 "function conn(){st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
 "ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
 "ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
 "setTimeout(function(){if(g===rt)conn()},Math.min(8000,1500*rd))};"
 "ws.onmessage=function(e){om=Date.now();rx++;try{var b=new Uint8Array(e.data),t=b[0];"
-"if(t==1){F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
-"else if(t==2){var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
+"if(t==1){f1++;F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
+"else if(t==2){m1++;var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
 "if(rsz||!V)sz();dr=1}"
-"else if(t==3){P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
-"else if(t==4){var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}"
-"}catch(er){st.textContent='rx err'}}}"
+"else if(t==3){p1++;P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
+"else if(t==4){r1++;var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}"
+"else if(t==5){txc=b[1]|(b[2]<<8)}"
+"}catch(ex){ec++;exm=ex.message||'err';st.textContent='rx err: '+exm}}}"
 "conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}"
 "if(ws&&ws.readyState==1){"
-"if(rx>0&&!pasting)st.textContent='connected rx='+rx;"
-"var need=(om===0&&Date.now()-ot>2000)||((!V||!P)&&rx>0&&Date.now()-lastsync>2500);"
+"if(Date.now()-stupd>1000&&!pasting){stupd=Date.now();"
+"st.textContent='connected rx='+rx+' f='+f1+' m='+m1+' p='+p1+' r='+r1+' e='+ec+(exm?' '+exm:'')+(txc>=0?' tx='+txc:'')}"
+"var need=(om===0&&Date.now()-ot>2000)||((!V||!P)&&rx>0&&Date.now()-lastsync>2500)"
+"||(r1===0&&Date.now()-ot>3000&&Date.now()-lastsync>2500);"
 "if(need&&Date.now()-lastsync>2500){lastsync=Date.now();st.textContent='resync...';"
 "ws.send(new Uint8Array([255]))}}"
 "},33);"
