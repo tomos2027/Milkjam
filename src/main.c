@@ -61,6 +61,7 @@ int main() {
         iotpad_wl_led_apply();//PICO2内蔵LED: timer()からのハートビート/診断希望状態を反映 (CYW43操作はメインスレッド限定)
         iotpad_wifi_tick();//Pico W: WiFi再接続・NTP開始・状態LEDの管理 (IOTPAD)
         //※async contextと同期する処理を含むためメインスレッドからのみ呼ぶ (割り込み内は禁止)
+        iotpad_web_tick();//Pico W: Web表示モードの画面転送タイマー鎖の自己修復 (ext_web.h)
         iotpad_sensors_read();//Pico W: IOTPADセンサー定期読み取り (1秒ごと、I2C/OneWire)
         iotpad_oled_update();//Pico W: IOTPAD OLED定期更新 (IOTPAD)
         iotpad_tb_tick();//Pico W: ThingsBoard自動送信 (IOTPAD)

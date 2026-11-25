@@ -46,6 +46,10 @@ static uint8_t web_client_cm, web_client_w, web_client_h, web_client_mag; // ク
 static uint8_t web_client_inv, web_client_xm, web_client_cx, web_client_cy, web_client_con;
 static uint32_t web_last_ack_ms;
 static uint32_t web_last_ping_ms;
+//画面転送タイマー鎖の自己修復用 (iotpad_web_tickがメインループから監視)
+//sys_timeoutの再登録が一度でも欠けると転送が永久停止するため、armedフラグと最終動作時刻を管理する
+static volatile uint8_t web_push_armed;
+static volatile uint32_t web_last_push_ms;
 //WS送信組み立てバッファ (先頭4バイトはWSヘッダ置き場)。
 //行差分を1フレームにまとめるため全画面分 (ワイド27行×87B+ヘッダ≈2351、sndbuf上限2144で分割) を格納できるサイズ
 static uint8_t web_wsbuf[2200];
@@ -321,13 +325,27 @@ static void web_ws_parse(struct tcp_pcb* pcb);
 //BASICのRUNでメインループが塞がっていても動く (タイマー割込みがvramを更新し続けるため)
 static void web_push_tick(void* arg) {
     (void)arg;
+    web_push_armed = 0;
+    web_last_push_ms = to_ms_since_boot(get_absolute_time());
     if (web_server_running) {
+        web_push_armed = 1;
         sys_timeout(WEB_PUSH_INTERVAL_MS, web_push_tick, NULL);
     }
     struct tcp_pcb* pcb = web_conn_pcb;
     if (!pcb || !web_conn_ws || web_conn_closing) return;
+    uint32_t now = web_last_push_ms;
+    //状態診断ログ (2秒ごと): ntsc_activeゲートの前に出力し、転送が止まっている原因
+    //(NTSC停止中か/WS未確立か/送信キュー詰まりか) をUARTで判別できるようにする
+    static uint32_t web_diag_tick_ms;
+    if (now - web_diag_tick_ms > 2000) {
+        web_diag_tick_ms = now;
+        char buf[120];
+        snprintf(buf, sizeof buf, "WEB: tick ntsc=%d ws=%d fo=%d sv=%d snd=%d ql=%d ack=%dms\n",
+            ntsc_active(), (int)web_conn_ws, (int)web_font_off, web_sent_valid,
+            (int)tcp_sndbuf(pcb), (int)pcb->snd_queuelen, (int)(now - web_last_ack_ms));
+        iotpad_dbg_str(buf);
+    }
     if (!ntsc_active()) return; //VIDEO 0等で映像停止中は転送しない
-    uint32_t now = to_ms_since_boot(get_absolute_time());
     //WS ping (10秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
     //30秒アイドル監視の誤発動を防ぐ (pongはブラウザが自動返信)
     if (now - web_last_ping_ms > 10000) {
@@ -432,16 +450,6 @@ static void web_push_tick(void* arg) {
     if (y == h) {
         web_sent_valid = 1; //全行を処理しきった
     }
-    //状態診断ログ (2秒ごと): 転送が止まっているときの原因特定用 (UART GP0 115200bps)
-    static uint32_t web_diag_tick_ms;
-    if (now - web_diag_tick_ms > 2000) {
-        web_diag_tick_ms = now;
-        char buf[112];
-        snprintf(buf, sizeof buf, "WEB: tick fo=%d sv=%d snd=%d ql=%d ack=%dms\n",
-            (int)web_font_off, web_sent_valid, (int)tcp_sndbuf(pcb), (int)pcb->snd_queuelen,
-            (int)(now - web_last_ack_ms));
-        iotpad_dbg_str(buf);
-    }
     // 5) フォント差分 (PCG: POKE #700-#7FFでの書き換えを検知して再送)
     for (int off = 0; off < 2048; off += 512) {
         if (memcmp(ntsc_fontram + off, web_sent_font + off, 512) == 0) continue;
@@ -458,10 +466,25 @@ static void web_push_tick(void* arg) {
     }
 }
 
+//メインループから呼ぶ (main.c): 画面転送タイマー鎖の自己修復。
+//sys_timeoutの再登録はpush tickの先頭で行うが、一度でも欠けると転送が永久停止するため、
+//200ms以上pushが動いていなければメインスレッドから再登録する (armedフラグで二重登録防止)
+void iotpad_web_tick() {
+    if (!web_server_running || web_push_armed) return;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - web_last_push_ms < 200) return;
+    web_push_armed = 1;
+    cyw43_arch_lwip_begin();
+    sys_timeout(WEB_PUSH_INTERVAL_MS, web_push_tick, NULL);
+    cyw43_arch_lwip_end();
+    iotpad_dbg_str("WEB: push rearm\n");
+}
+
 //===== ブラウザページ (flash定数。フォントはWSで受信するためページは小さい) =====
 static const char WEB_PAGE[] =
 "<!DOCTYPE html><html><head><meta charset='utf-8'>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<link rel='icon' href='data:,'>"
 "<title>Milkjam</title><style>"
 "body{background:#000;color:#999;font:13px monospace;margin:0;text-align:center}"
 "#c{image-rendering:pixelated;background:#000;margin:8px auto 4px;display:block;touch-action:none}"
@@ -509,19 +532,21 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
-"var rd=0,rt=0;"
+"var rd=0,rt=0,ot=0,om=0;"
 "function conn(){st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
-"ws.onopen=function(){rd=0;st.textContent='connected';st.style.color='#6c6'};"
+"ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
 "ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
 "setTimeout(function(){if(g===rt)conn()},Math.min(8000,1500*rd))};"
-"ws.onmessage=function(e){var b=new Uint8Array(e.data),t=b[0];"
+"ws.onmessage=function(e){om=Date.now();var b=new Uint8Array(e.data),t=b[0];"
 "if(t==1){F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
 "else if(t==2){var rsz=CM!=b[1]||W!=b[2]||H!=b[3];CM=b[1];W=b[2];H=b[3];M=b[4];inv=b[5];XM=b[6];cx=b[7];cy=b[8];con=b[9];"
 "if(rsz||!V)sz();dr=1}"
 "else if(t==3){P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
 "else if(t==4){var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}}}"
-"conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}},33);"
+"conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}"
+"if(ws&&ws.readyState==1&&om===0&&Date.now()-ot>3000){st.textContent='no data - reconnect';rec()}"
+"},33);"
 "var KM={Enter:[10],Backspace:[8],Tab:[9],Escape:[27],ArrowLeft:[28],ArrowRight:[29],"
 "ArrowUp:[30],ArrowDown:[31],Home:[18],End:[23],PageUp:[19],PageDown:[20],Insert:[17],Delete:[127]};"
 "var FK={F1:[19,12],F2:[24,76,79,65,68],F3:[24,83,65,86,69],F4:[24,76,73,83,84,10],"
@@ -593,9 +618,9 @@ static int web_ws_key(char* key, int keylen) {
 }
 
 static void web_send_page_start(struct tcp_pcb* pcb) {
-    char hdr[128]; // ヘッダ全体は約100バイト
+    char hdr[160]; // ヘッダ全体は約125バイト (Cache-Control追加)
     int n = snprintf(hdr, sizeof hdr,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
         WEB_PAGE_LEN);
     web_page_off = 0;
     if (tcp_write(pcb, hdr, n, TCP_WRITE_FLAG_COPY) == ERR_OK) {
@@ -886,6 +911,8 @@ void iotpad_web_ap_start() {
     //画面転送周期タイマー開始 (lwIPのsys_timeout → RUN中も割込みで駆動)
     web_reset_conn_state();
     web_conn_pcb = NULL;
+    web_push_armed = 1;
+    web_last_push_ms = to_ms_since_boot(get_absolute_time());
     sys_timeout(WEB_PUSH_INTERVAL_MS, web_push_tick, NULL);
     cyw43_arch_lwip_end();
     web_server_running = web_dhcp_pcb != NULL && web_listen_pcb != NULL;
@@ -901,6 +928,7 @@ void iotpad_web_ap_stop() {
     if (!web_server_running) return;
     iotpad_dbg_str("WEB: ap stop\n");
     sys_untimeout(web_push_tick, NULL);
+    web_push_armed = 0;
     cyw43_arch_lwip_begin();
     if (web_conn_pcb) {
         tcp_abort(web_conn_pcb);
