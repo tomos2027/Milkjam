@@ -304,18 +304,19 @@ static void web_push_tick(void* arg) {
     int h = SCREEN_H;
     int mag = 1 << _g.screen_big;
     // 1) フォント未送信チャンク (接続直後。ntsc_fontram = IchigoJamフォント+PCG 2048バイト)
-    //メッセージ形式: [1][オフセット2byte][長さ2byte][データ...] (オフセット/長さはLE)
+    //メッセージ形式: [1][オフセット2byte][長さ2byte][データ...] (先頭1バイト=メッセージ種別、オフセット/長さはLE)
     while (web_font_off < 2048) {
-        if (tcp_sndbuf(pcb) < 4 + 516) return;
+        if (tcp_sndbuf(pcb) < 4 + 517) return;
         int len = 2048 - web_font_off;
         if (len > 512) len = 512;
         uint8* pay = web_wsbuf + 4;
-        pay[0] = web_font_off & 0xFF;
-        pay[1] = (web_font_off >> 8) & 0xFF;
-        pay[2] = len & 0xFF;
-        pay[3] = len >> 8;
-        memcpy(pay + 4, ntsc_fontram + web_font_off, len);
-        if (!web_ws_tx(pcb, 2, 4 + len)) return; //opcode 2=バイナリ (テキスト1はUTF-8検証で切断される)
+        pay[0] = 1; //種別=フォント
+        pay[1] = web_font_off & 0xFF;
+        pay[2] = (web_font_off >> 8) & 0xFF;
+        pay[3] = len & 0xFF;
+        pay[4] = len >> 8;
+        memcpy(pay + 5, ntsc_fontram + web_font_off, len);
+        if (!web_ws_tx(pcb, 2, 5 + len)) return; //opcode 2=バイナリ (テキスト1はUTF-8検証で切断される)
         memcpy(web_sent_font + web_font_off, ntsc_fontram + web_font_off, len);
         web_font_off += len;
     }
@@ -330,18 +331,19 @@ static void web_push_tick(void* arg) {
     if (cm != web_client_cm || w != web_client_w || h != web_client_h || mag != web_client_mag
         || inv != web_client_inv || xm != web_client_xm || cx != web_client_cx || cy != web_client_cy
         || con != web_client_con) {
-        if (tcp_sndbuf(pcb) < 4 + 10) return;
+        if (tcp_sndbuf(pcb) < 4 + 11) return;
         uint8* pay = web_wsbuf + 4;
-        pay[0] = cm;
-        pay[1] = w;
-        pay[2] = h;
-        pay[3] = mag;
-        pay[4] = inv;
-        pay[5] = xm;
-        pay[6] = cx;
-        pay[7] = cy;
-        pay[8] = con;
-        if (!web_ws_tx(pcb, 2, 9)) return;
+        pay[0] = 2; //種別=モード
+        pay[1] = cm;
+        pay[2] = w;
+        pay[3] = h;
+        pay[4] = mag;
+        pay[5] = inv;
+        pay[6] = xm;
+        pay[7] = cx;
+        pay[8] = cy;
+        pay[9] = con;
+        if (!web_ws_tx(pcb, 2, 10)) return;
         int grid_changed = cm != web_client_cm || w != web_client_w || h != web_client_h || mag != web_client_mag;
         web_client_cm = cm;
         web_client_w = w;
@@ -356,9 +358,10 @@ static void web_push_tick(void* arg) {
     }
     // 3) パレット (RGB332 16色、PALコマンドの変更を反映)
     if (memcmp(screen_pal, web_sent_pal, 16) != 0) {
-        if (tcp_sndbuf(pcb) < 4 + 16) return;
-        memcpy(web_wsbuf + 4, screen_pal, 16);
-        if (!web_ws_tx(pcb, 2, 16)) return; //opcode 2=バイナリ (3-7は予約オペコードで切断される)
+        if (tcp_sndbuf(pcb) < 4 + 17) return;
+        web_wsbuf[4] = 3; //種別=パレット
+        memcpy(web_wsbuf + 5, screen_pal, 16);
+        if (!web_ws_tx(pcb, 2, 17)) return; //opcode 2=バイナリ (3-7は予約オペコードで切断される)
         memcpy(web_sent_pal, screen_pal, 16);
     }
     // 4) 行差分 ([4][y][w][文字w][属性w]、vram+screen_attrを直接送る)
@@ -369,13 +372,14 @@ static void web_push_tick(void* arg) {
             && memcmp(al, web_sent_attr + y * w, w) == 0) {
             continue;
         }
-        if (tcp_sndbuf(pcb) < 4 + 2 + 2 * w) return; //次の周期で続きを送る
+        if (tcp_sndbuf(pcb) < 4 + 3 + 2 * w) return; //次の周期で続きを送る
         uint8* pay = web_wsbuf + 4;
-        pay[0] = y;
-        pay[1] = w;
-        memcpy(pay + 2, cl, w);
-        memcpy(pay + 2 + w, al, w);
-        if (!web_ws_tx(pcb, 2, 2 + 2 * w)) return; //opcode 2=バイナリ (4は予約オペコード)
+        pay[0] = 4; //種別=行
+        pay[1] = y;
+        pay[2] = w;
+        memcpy(pay + 3, cl, w);
+        memcpy(pay + 3 + w, al, w);
+        if (!web_ws_tx(pcb, 2, 3 + 2 * w)) return; //opcode 2=バイナリ
         memcpy(web_sent_char + y * w, cl, w);
         memcpy(web_sent_attr + y * w, al, w);
     }
@@ -383,14 +387,15 @@ static void web_push_tick(void* arg) {
     // 5) フォント差分 (PCG: POKE #700-#7FFでの書き換えを検知して再送)
     for (int off = 0; off < 2048; off += 512) {
         if (memcmp(ntsc_fontram + off, web_sent_font + off, 512) == 0) continue;
-        if (tcp_sndbuf(pcb) < 4 + 516) return;
+        if (tcp_sndbuf(pcb) < 4 + 517) return;
         uint8* pay = web_wsbuf + 4;
-        pay[0] = off & 0xFF;
-        pay[1] = off >> 8;
-        pay[2] = 512 & 0xFF;
-        pay[3] = 512 >> 8;
-        memcpy(pay + 4, ntsc_fontram + off, 512);
-        if (!web_ws_tx(pcb, 2, 4 + 512)) return; //opcode 2=バイナリ
+        pay[0] = 1; //種別=フォント
+        pay[1] = off & 0xFF;
+        pay[2] = (off >> 8) & 0xFF;
+        pay[3] = 512 & 0xFF;
+        pay[4] = 512 >> 8;
+        memcpy(pay + 5, ntsc_fontram + off, 512);
+        if (!web_ws_tx(pcb, 2, 5 + 512)) return; //opcode 2=バイナリ
         memcpy(web_sent_font + off, ntsc_fontram + off, 512);
     }
 }
