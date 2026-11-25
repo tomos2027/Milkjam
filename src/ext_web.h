@@ -268,13 +268,15 @@ static int web_ws_tx(struct tcp_pcb* pcb, int opcode, int len) {
 }
 
 //受信したキーデータをBASICのキーバッファへ (ESCはSTOPフラグも立てる。hid_app.cと同じ経路)
-static void web_keys_in(const uint8_t* data, int len) {
+//paste=1: コードペースト (WSテキストフレーム) — かな変換とESC停止フラグをバイパスし、
+//         プログラムコードをそのままデータとして入力する
+static void web_keys_in(const uint8_t* data, int len, int paste) {
     for (int i = 0; i < len; i++) {
         char ch = (char)data[i];
-        if (key_flg.kana) {
+        if (!paste && key_flg.kana) {
             ch = romajikana_input(ch); // ローマ字かな変換 (USBキーボードと同じ経路)
         }
-        if (ch == ESC) {
+        if (!paste && ch == ESC) {
             _g.key_flg_esc = 1;
         }
         key_pushc(ch);
@@ -470,7 +472,12 @@ static const char WEB_PAGE[] =
 "<button onmousedown='kp([30])'>&#8593;</button><button onmousedown='kp([31])'>&#8595;</button>"
 "<button onmousedown='kp([29])'>&#8594;</button><button onmousedown='kp([10])'>ENTER</button></div>"
 "<div><button onmousedown='szm(-1)'>－</button><button onmousedown='szm(1)'>＋</button>"
-"<button onmousedown='szf()'>FIT</button></div>"
+"<button onmousedown='szf()'>FIT</button><button onmousedown='popen()'>PASTE</button></div>"
+"<div id=p style='display:none;position:fixed;left:0;top:0;width:100%;height:100%;"
+"background:rgba(0,0,0,.85);z-index:9;padding-top:20px'>"
+"<textarea id=t rows=8 style='width:92%;background:#111;color:#ccc;border:1px solid #555;"
+"font:13px monospace'></textarea><br>"
+"<button onmousedown='psend()' id=pb>送信</button><button onmousedown='pclose()'>閉じる</button></div>"
 "<input id=k autocomplete='off' autocapitalize='off'><script>"
 "var F=new Uint8Array(2048),V=null,A=null,W=32,H=24,M=1,CM=0,inv=0,XM=240,cx=0,cy=0,con=0,P=null,ws=null,dr=0,bl=1;"
 "var cv=document.getElementById('c'),g=cv.getContext('2d'),img=null;"
@@ -518,14 +525,34 @@ static const char WEB_PAGE[] =
 "F5:[24,82,85,78,10],F6:[24,63,70,82,69,69,40,41,10],F7:[24,79,85,84,48,10],"
 "F8:[24,86,73,68,69,79,49,10],F9:[24,70,73,76,69,83],F10:[24,83,87,73,84,67,72,10]};"
 "function kp(c){if(ws&&ws.readyState==1)ws.send(new Uint8Array(c))}"
-"document.addEventListener('keydown',function(e){if(!ws||ws.readyState!=1)return;"
-"var k=FK[e.key]||KM[e.key];"
+"document.addEventListener('keydown',function(e){if(pv.style.display=='block')return;"
+"if(!ws||ws.readyState!=1)return;var k=FK[e.key]||KM[e.key];"
 "if(!k&&e.key.length==1){var c=e.key.charCodeAt(0);"
 "if(e.ctrlKey){if(c>96&&c<123)c-=96;else if(c>64&&c<91)c-=64;else if(c!=32)return;}k=[c]}"
 "if(!k)return;e.preventDefault();kp(k)});"
 "cv.addEventListener('touchend',function(e){e.preventDefault();kb.focus()});"
 "kb.addEventListener('input',function(){var v=kb.value;kb.value='';"
 "if(v.length==1)kp([v.charCodeAt(0)])});"
+"var pv=document.getElementById('p'),ta=document.getElementById('t'),pb=document.getElementById('pb'),pasting=0;"
+"function popen(){pv.style.display='block';ta.focus()}"
+"function pclose(){pv.style.display='none';pasting=0;pb.textContent='送信'}"
+"function psend(){if(pasting){pasting=0;pb.textContent='送信';return}"
+"if(!ws||ws.readyState!=1){st.textContent='not connected';return}"
+"var s=ta.value.split('\\r').join(''),raw=s.split('\\n'),L=[],skip=0,i,j,line,out;"
+"for(i=0;i<raw.length;i++){line=raw[i].split('\\t').join(' ');out='';"
+"for(j=0;j<line.length;j++){var c=line.charCodeAt(j);if(c>=32&&c<127)out+=line[j];else skip++}"
+"if(out.length)L.push(out)}"
+"if(!L.length){st.textContent='PASTE: no lines';return}"
+"pasting=1;pb.textContent='停止';psloop(L,0,skip)}"
+"function psloop(L,i,skip){"
+"if(!pasting){pb.textContent='送信';return}"
+"if(!ws||ws.readyState!=1){pasting=0;pb.textContent='送信';st.textContent='PASTE aborted';return}"
+"if(i>=L.length){pasting=0;pb.textContent='送信';st.textContent='PASTE done'+(skip?' (skip '+skip+')':'');return}"
+"ws.send(L[i]+'\\n');st.textContent='PASTE '+(i+1)+'/'+L.length+(skip?' skip:'+skip:'');"
+"setTimeout(function(){psloop(L,i+1,skip)},120)}"
+"document.addEventListener('paste',function(e){if(pv.style.display=='block')return;"
+"var t=e.clipboardData?e.clipboardData.getData('text'):null;"
+"if(t&&ws&&ws.readyState==1){ta.value=t;popen();e.preventDefault()}});"
 "</script></body></html>\n";
 #define WEB_PAGE_LEN ((int)(sizeof WEB_PAGE - 1))
 
@@ -669,8 +696,10 @@ static void web_ws_parse(struct tcp_pcb* pcb) {
         } else if (opcode == 0x9) { //ping → pong
             memcpy(web_wsbuf + 4, pay, len);
             web_ws_tx(pcb, 0xA, len);
-        } else if (opcode == 0x1 || opcode == 0x2 || opcode == 0x0) { //テキスト/バイナリ/継続
-            web_keys_in(pay, len);
+        } else if (opcode == 0x1) { //テキストフレーム = コードペースト (かな変換/ESC停止をバイパス)
+            web_keys_in(pay, len, 1);
+        } else if (opcode == 0x2 || opcode == 0x0) { //バイナリ/継続 = キー入力
+            web_keys_in(pay, len, 0);
         }
         pos += hl + len;
     }
