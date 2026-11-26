@@ -344,7 +344,10 @@ S_INLINE void list_setPC(int n) {
 
 
 
-#define N_TOKEN_EXPRESSION TOKEN_LET
+//Milkjam修正: 旧値はTOKEN_LET (69) でID70以降のトークンが式内で使えなかったため
+//N_TOKEN (全トークン) に拡大 — PAL(/ATTR( 関数が式内で利用可能になる。
+//式パーサーは非演算子トークンでtoken_backするため IF...THEN/FOR...TO 等の解析は不変
+#define N_TOKEN_EXPRESSION N_TOKEN
 #define N_TOKEN_OFFSET 4
 
 #ifdef VERSION15

@@ -7,7 +7,9 @@
 //※表末尾に追記のため既存コードは不変、N_TOKENは136→137
 //Pico 2 W版: SDON/SDOFF (SDカード、Canon-boy4氏 GivetakeJam_P rp2350-16130準拠) と
 //LCDON/LCDOFF (HDMI/LCDピン排他) を表末尾に追記、N_TOKENは137→141
-#define N_TOKEN 141
+//Milkjam修正: 9b25b08で表末尾に追記したPAL(/ATTR(/COLOR/PAL/ATTR/COL/SOUND/IR.OUTの8エントリ
+//  (ID 145-152) がN_TOKEN更新漏れのためトークナイザの走査範囲外であったため141→149 (Syntax error修復)
+#define N_TOKEN 149
 #define TOKEN_NULL 0
 #define TOKEN_VAR 1
 #define TOKEN_NUMBER 2
