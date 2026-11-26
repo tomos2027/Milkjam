@@ -35,7 +35,7 @@
 #define MEM_SIZE                    (16 * 1024)
 #define MEMP_NUM_TCP_PCB            6 // 待受+Web(HTTP/WS)+ThingsBoard+余裕 (Web画面転送用)
 #define MEMP_NUM_TCP_PCB_LISTEN     1
-#define MEMP_NUM_TCP_SEG            32
+#define MEMP_NUM_TCP_SEG            40
 #define MEMP_NUM_UDP_PCB            4
 #define MEMP_NUM_PBUF               8
 #define MEMP_NUM_NETBUF             0
@@ -47,9 +47,9 @@
 #define MEMP_NUM_SYS_TIMEOUT        12
 #define PBUF_POOL_SIZE              12
 #define TCP_MSS                     536
-#define TCP_WND                     (4 * TCP_MSS)
-#define TCP_SND_BUF                 (4 * TCP_MSS)
-#define TCP_SND_QUEUELEN            16
+#define TCP_WND                     (8 * TCP_MSS)
+#define TCP_SND_BUF                 (8 * TCP_MSS) //フォント+モード+パレット+全行 (約3.8KB) を1周期で送れるサイズ
+#define TCP_SND_QUEUELEN            24
 #define TCP_QUEUE_OOSEQ             0
 #define TCP_LISTEN_BACKLOG           0
 #define LWIP_SINGLE_NETIF           1

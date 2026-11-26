@@ -63,6 +63,7 @@ static uint8_t web_sent_char[32 * 24];
 static uint8_t web_sent_attr[32 * 24];
 static uint8_t web_sent_font[2048];
 static uint8_t web_sent_pal[16];
+static uint8_t web_sent_pal_valid; //0=パレット未送信 (接続切替/resyncで無効化、次tickで必ず再送)
 static int web_sent_valid;
 
 //===== SHA1 (WebSocketハンドシェイクのSec-WebSocket-Accept計算用) =====
@@ -296,6 +297,7 @@ static void web_reset_conn_state() {
     web_page_off = -1;
     web_font_off = 0;
     web_sent_valid = 0;
+    web_sent_pal_valid = 0; //新クライアントはパレットを持っていないため必ず再送する
     web_client_cm = 0xFF; //クライアントはまだ何も知らない (モード再送を促す)
     web_client_w = 0;
     web_client_h = 0;
@@ -424,12 +426,14 @@ static void web_push_tick(void* arg) {
         if (grid_changed) web_sent_valid = 0; //グリッドサイズが変わるため全行再送
     }
     // 3) パレット (RGB332 16色、PALコマンドの変更を反映)
-    if (memcmp(screen_pal, web_sent_pal, 16) != 0) {
+    //未送信フラグまたは内容変化で送る (web_sent_palの状態は接続切替/resyncで無効化する)
+    if (!web_sent_pal_valid || memcmp(screen_pal, web_sent_pal, 16) != 0) {
         if (tcp_sndbuf(pcb) < 4 + 17) return;
         web_wsbuf[4] = 3; //種別=パレット
         memcpy(web_wsbuf + 5, screen_pal, 16);
         if (!web_ws_tx(pcb, 2, 17)) return; //opcode 2=バイナリ (3-7は予約オペコードで切断される)
         memcpy(web_sent_pal, screen_pal, 16);
+        web_sent_pal_valid = 1;
     }
     // 4) 行差分 (全差分行を1フレームにまとめて送る: 小フレームの連続送信は
     //    送信キュー/ACK粒度との絡みで送信が停滞するため)
@@ -757,6 +761,7 @@ static void web_ws_parse(struct tcp_pcb* pcb) {
                 //再同期要求: 差分ベースを全リセットし、次のpush tickから
                 //フォント/モード/パレット/全行をフル再送する (0xFFはキー入力では使わない)
                 web_sent_valid = 0;
+                web_sent_pal_valid = 0; //パレットも必ず再送する
                 web_font_off = 0;
                 web_client_cm = 0xFF;
                 web_client_w = 0;
