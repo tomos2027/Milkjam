@@ -33,7 +33,7 @@
 // RAM節約 (デフォルトはMEM_SIZE等が大きい)
 #define MEM_LIBC_MALLOC             0
 #define MEM_SIZE                    (16 * 1024)
-#define MEMP_NUM_TCP_PCB            6 // 待受+Web(HTTP/WS)+ThingsBoard+余裕 (Web画面転送用)
+#define MEMP_NUM_TCP_PCB            8 // 待受+Web(HTTP/WS)+TIME_WAIT等の枯渇でSYN再試行が滞らないよう余裕を持つ
 #define MEMP_NUM_TCP_PCB_LISTEN     1
 #define MEMP_NUM_TCP_SEG            40
 #define MEMP_NUM_UDP_PCB            4

@@ -119,6 +119,54 @@ static void web_b64(const uint8_t* in, int len, char* out) {
     out[o] = 0;
 }
 
+//===== 簡易DNSサーバー (udp 53) =====
+//AP内の名前解決用 (DHCPでDNS=自身を通知)。すべてのAレコード問い合わせに自身 (192.168.4.1) を
+//即答するため、クライアントOSの接続検証 (Windows NCSI/Android connectivitycheck等) が
+//DNSタイムアウト (1回5秒×複数回) で滞留せず、AP接続直後にネットワークが即使用可能になる
+static struct udp_pcb* web_dns_pcb;
+static uint8_t web_dns_tx[512];
+
+//DNS受信 (lwIP = 割込みコンテキスト): A→自身のアドレス、AAAA→空応答 (NODATA)、その他は無視
+static void web_dns_recv(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr_t* addr, u16_t port) {
+    (void)arg; (void)pcb;
+    uint8_t q[512];
+    int len = p && p->tot_len <= (int)sizeof q ? pbuf_copy_partial(p, q, sizeof q, 0) : 0;
+    pbuf_free(p);
+    if (len < 17) return; //ヘッダ12 + 最小の問い合わせ
+    u16_t flags = ((u16_t)q[2] << 8) | q[3];
+    if (flags & 0x8000) return; //応答は無視 (クエリのみ)
+    if (((u16_t)q[4] << 8 | q[5]) < 1) return; //QDCOUNT
+    //質問部の終端を探す (QNAMEの0終端 + QTYPE2 + QCLASS2)
+    int i = 12;
+    while (i < len && q[i] != 0) i += q[i] + 1;
+    if (i + 5 > len) return;
+    int qtype = (q[i + 1] << 8) | q[i + 2];
+    if (qtype != 1 && qtype != 28) return; //A/AAAA以外は無視
+    int qlen = i + 5 - 12; //質問部の長さ (12起点)
+    uint8_t* t = web_dns_tx;
+    memcpy(t, q, 12); //ID等をコピー
+    t[2] = 0x84; t[3] = 0x00; //QR=1 AA=1 RCODE=0
+    memcpy(t + 12, q + 12, qlen);
+    int o = 12 + qlen;
+    if (qtype == 1) {
+        //回答: NAME (0xC00C圧縮ポインタ) TYPE=A CLASS=IN TTL=10 RDLENGTH=4 RDATA=192.168.4.1
+        t[o++] = 0xC0; t[o++] = 0x0C;
+        t[o++] = 0; t[o++] = 1;
+        t[o++] = 0; t[o++] = 1;
+        t[o++] = 0; t[o++] = 0; t[o++] = 0; t[o++] = 10;
+        t[o++] = 0; t[o++] = 4;
+        t[o++] = 192; t[o++] = 168; t[o++] = 4; t[o++] = 1;
+        t[6] = 0; t[7] = 1; //ANCOUNT=1
+    } else {
+        t[6] = 0; t[7] = 0; //AAAA: NODATA (即フォールバックでAを問いさせる)
+    }
+    struct pbuf* r = pbuf_alloc(PBUF_TRANSPORT, o, PBUF_RAM);
+    if (!r) return;
+    memcpy(r->payload, t, o);
+    udp_sendto(web_dns_pcb, r, addr, port);
+    pbuf_free(r);
+}
+
 //===== 簡易DHCPサーバー (udp 67) =====
 struct web_dhcp_lease {
     uint8_t mac[6];
@@ -173,6 +221,8 @@ static void web_dhcp_reply(const uint8_t* req, int reqlen, int msgtype, uint32_t
     t[o++] = WEB_DHCP_LEASE_SEC >> 24; t[o++] = WEB_DHCP_LEASE_SEC >> 16; t[o++] = (WEB_DHCP_LEASE_SEC >> 8) & 0xFF; t[o++] = WEB_DHCP_LEASE_SEC & 0xFF;
     t[o++] = 1; t[o++] = 4; t[o++] = 255; t[o++] = 255; t[o++] = 255; t[o++] = 0; // サブネットマスク
     t[o++] = 3; t[o++] = 4;                                       // ルーター
+    t[o++] = (WEB_IP_BASE >> 24) & 0xFF; t[o++] = (WEB_IP_BASE >> 16) & 0xFF; t[o++] = (WEB_IP_BASE >> 8) & 0xFF; t[o++] = WEB_IP_BASE & 0xFF;
+    t[o++] = 6; t[o++] = 4;                                       // DNSサーバー (簡易DNS=自身)
     t[o++] = (WEB_IP_BASE >> 24) & 0xFF; t[o++] = (WEB_IP_BASE >> 16) & 0xFF; t[o++] = (WEB_IP_BASE >> 8) & 0xFF; t[o++] = WEB_IP_BASE & 0xFF;
     t[o++] = 255; // end
     struct pbuf* p = pbuf_alloc(PBUF_TRANSPORT, o, PBUF_RAM);
@@ -553,8 +603,8 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
-"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0,f1=0,m1=0,p1=0,r1=0,ec=0,exm='',txc=-1,stupd=0;"
-"function conn(){st.textContent='connecting...';st.style.color='#a66';"
+"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0,f1=0,m1=0,p1=0,r1=0,ec=0,exm='',txc=-1,stupd=0,t0=0;"
+"function conn(){if(!t0)t0=Date.now();st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
 "ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
 "ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
@@ -570,7 +620,7 @@ static const char WEB_PAGE[] =
 "conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}"
 "if(ws&&ws.readyState==1){"
 "if(Date.now()-stupd>1000&&!pasting){stupd=Date.now();"
-"st.textContent='connected rx='+rx+' f='+f1+' m='+m1+' p='+p1+' r='+r1+' e='+ec+(exm?' '+exm:'')+(txc>=0?' tx='+txc:'')}"
+"st.textContent='connected t='+Math.floor((Date.now()-t0)/1000)+'s rx='+rx+' f='+f1+' m='+m1+' p='+p1+' r='+r1+' e='+ec+(exm?' '+exm:'')+(txc>=0?' tx='+txc:'')}"
 "var need=(om===0&&Date.now()-ot>2000)||((!V||!P)&&rx>0&&Date.now()-lastsync>2500)"
 "||(r1===0&&Date.now()-ot>3000&&Date.now()-lastsync>2500);"
 "if(need&&Date.now()-lastsync>2500){lastsync=Date.now();st.textContent='resync...';"
@@ -706,8 +756,9 @@ static void web_http_process(struct tcp_pcb* pcb) {
         web_rlen = 0; //同一ヘッダの再処理防止
         return;
     }
-    //それ以外は404
-    static const char nf[] = "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+    //それ以外 (favicon除くため/favicon.ico等、captive portal検証の/connecttest.txtや/generate_204等) は
+    //204 No Content — クライアントOSの「インターネット接続検証」が即完了し、AP接続直後の待ち時間を解消する
+    static const char nf[] = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
     if (tcp_write(pcb, nf, sizeof nf - 1, TCP_WRITE_FLAG_COPY) == ERR_OK) {
         tcp_output(pcb);
         web_conn_closing = 1;
@@ -944,6 +995,16 @@ void iotpad_web_ap_start() {
             udp_recv(web_dhcp_pcb, web_dhcp_recv, NULL);
         }
     }
+    //簡易DNSサーバー (udp 53) 開始
+    web_dns_pcb = udp_new();
+    if (web_dns_pcb) {
+        if (udp_bind(web_dns_pcb, IP_ADDR_ANY, 53) != ERR_OK) {
+            udp_remove(web_dns_pcb);
+            web_dns_pcb = NULL;
+        } else {
+            udp_recv(web_dns_pcb, web_dns_recv, NULL);
+        }
+    }
     //Webサーバー (tcp 80) 開始
     struct tcp_pcb* l = tcp_new();
     if (l) {
@@ -988,6 +1049,10 @@ void iotpad_web_ap_stop() {
     if (web_dhcp_pcb) {
         udp_remove(web_dhcp_pcb);
         web_dhcp_pcb = NULL;
+    }
+    if (web_dns_pcb) {
+        udp_remove(web_dns_pcb);
+        web_dns_pcb = NULL;
     }
     cyw43_arch_lwip_end();
     web_reset_conn_state();
