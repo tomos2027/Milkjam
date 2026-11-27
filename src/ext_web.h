@@ -46,6 +46,7 @@ static uint8_t web_client_cm, web_client_w, web_client_h, web_client_mag; // ク
 static uint8_t web_client_inv, web_client_xm, web_client_cx, web_client_cy, web_client_con;
 static uint32_t web_last_ack_ms;
 static uint32_t web_last_ping_ms;
+static uint16_t web_ping_fail; //WS pingの連続失敗数 (転送経路の停滞診断用、UARTに出力)
 static uint32_t web_tx_count; //WS送信フレーム数 (クライアントの診断表示用、統計フレームで通知)
 //画面転送タイマー鎖の自己修復用 (iotpad_web_tickがメインループから監視)
 //sys_timeoutの再登録が一度でも欠けると転送が永久停止するため、armedフラグと最終動作時刻を管理する
@@ -365,6 +366,7 @@ static void web_reset_conn_state() {
     web_font_off = 0;
     web_sent_valid = 0;
     web_sent_pal_valid = 0; //新クライアントはパレットを持っていないため必ず再送する
+    web_ping_fail = 0;
     web_client_cm = 0xFF; //クライアントはまだ何も知らない (モード再送を促す)
     web_client_w = 0;
     web_client_h = 0;
@@ -417,11 +419,22 @@ static void web_push_tick(void* arg) {
         iotpad_dbg_str(buf);
     }
     if (!ntsc_active()) return; //VIDEO 0等で映像停止中は転送しない
-    //WS ping (5秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
-    //アイドル監視の誤発動とクライアント側WiFiのアイドル切断を防ぐ (pongはブラウザが自動返信)
-    if (now - web_last_ping_ms > 5000) {
+    //WS ping (3秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
+    //アイドル監視の誤発動とクライアント側WiFiのアイドル切断を防ぐ (pongはブラウザが自動返信)。
+    //連続失敗数はUARTに出力し、転送経路 (クライアント側) の停滞診断に使う
+    if (now - web_last_ping_ms > 3000) {
         web_last_ping_ms = now;
-        web_ws_tx(pcb, 0x9, 0);
+        if (web_ws_tx(pcb, 0x9, 0)) {
+            web_ping_fail = 0;
+        } else {
+            web_ping_fail++;
+            if (web_ping_fail % 5 == 0) {
+                char buf[64];
+                snprintf(buf, sizeof buf, "WEB: ping fail x%d snd=%d ql=%d\n",
+                    web_ping_fail, (int)tcp_sndbuf(pcb), (int)pcb->snd_queuelen);
+                iotpad_dbg_str(buf);
+            }
+        }
     }
     //送信統計フレーム (1秒ごと): [5][送信フレーム数2byte][デバイス起動時間2byte] —
     //クライアントの診断表示 (tx=N up=XXs) 用。push tickが動いていれば転送が詰まっていても

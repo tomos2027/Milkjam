@@ -57,7 +57,19 @@ int main() {
 
         key_flg.insert = key_flg.bkinsert;
     }
+    //メインループ停滞検出 (診断): 周回が500ms以上滞留したらUARTに出力する。
+    //ブラウザ側で画面更新/キー入力が止まったとき、デバイス側メインループのブロック
+    //(lwIPロック待ち、I2C/センサー読み取り等) の有無を判別できる。
+    //※RUN実行中はexec()がブロックするため本ログは正常動作でも出る (仕様)
+    uint32_t web_loop_last = to_ms_since_boot(get_absolute_time());
     while (1) {
+        uint32_t web_loop_now = to_ms_since_boot(get_absolute_time());
+        if (web_loop_now - web_loop_last > 500) {
+            char dbg[48];
+            snprintf(dbg, sizeof dbg, "MAIN STALL %ums\n", (int)(web_loop_now - web_loop_last));
+            iotpad_dbg_str(dbg);
+        }
+        web_loop_last = web_loop_now;
         iotpad_wl_led_apply();//PICO2内蔵LED: timer()からのハートビート/診断希望状態を反映 (CYW43操作はメインスレッド限定)
         iotpad_wifi_tick();//Pico W: WiFi再接続・NTP開始・状態LEDの管理 (IOTPAD)
         //※async contextと同期する処理を含むためメインスレッドからのみ呼ぶ (割り込み内は禁止)
