@@ -628,7 +628,7 @@ static const char WEB_PAGE[] =
 "function conn(){if(!t0)t0=Date.now();st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
 "ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
-"ws.onclose=function(){ws=null;rd++;var g=rt;st.textContent='retry...';"
+"ws.onclose=function(e){ws=null;rd++;var g=rt;st.textContent='retry... c='+(e&&e.code!==undefined?e.code:'?')+(e&&e.wasClean?' clean':'');"
 "setTimeout(function(){if(g===rt)conn()},Math.min(8000,1500*rd))};"
 "ws.onmessage=function(e){om=Date.now();rx++;try{var b=new Uint8Array(e.data),t=b[0];"
 "if(t==1){f1++;F.set(b.subarray(5,5+(b[3]|(b[4]<<8))),b[1]|(b[2]<<8));dr=1}"
