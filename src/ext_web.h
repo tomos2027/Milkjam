@@ -29,7 +29,7 @@
 #define WEB_DHCP_LEASE_SEC    86400            // リース時間 (24時間)
 #define WEB_TCP_BUF           1024             // 受信バッファ (HTTPヘッダ/WSフレームの部分受信)
 #define WEB_WS_PAYLOAD_MAX    520              // 送受信ペイロード上限 (フォントチャンク515含む)
-#define WEB_IDLE_TIMEOUT_MS   30000            // ACKが30秒止まったら接続を回収
+#define WEB_IDLE_TIMEOUT_MS   10000            // ACKが10秒止まったら接続を回収 (無線切断等で死んだ接続の残存時間を短縮)
 
 //===== 状態 =====
 static struct udp_pcb* web_dhcp_pcb;
@@ -54,6 +54,8 @@ static volatile uint32_t web_last_push_ms;
 //WS送信組み立てバッファ (先頭4バイトはWSヘッダ置き場)。
 //行差分を1フレームにまとめるため全画面分 (ワイド27行×87B+ヘッダ≈2351、sndbuf上限2144で分割) を格納できるサイズ
 static uint8_t web_wsbuf[2200];
+
+static void web_reset_conn_state(); //接続状態リセット (web_cleanup_stale_connから先行参照)
 
 //送信済み差分ベース (クライアントと共有している内容の控え)
 //画面データはvram/screen_attr (最大32x24) を直接読む。拡大 (VIDEO 3/4) はTVRAMでは
@@ -199,6 +201,19 @@ static uint32_t web_dhcp_assign(const uint8_t* mac) {
     return 0;
 }
 
+//DHCPクライアントが(再)接続してきた際の強制クリーンアップ: 同一クライアント (IP一致) の
+//TCP接続が残っていれば即座に破棄する。無線切断等で死んだ接続がIdle監視 (10秒) を待たず、
+//再接続直後のリロードで即クリーンな状態にできる
+static void web_cleanup_stale_conn(uint32_t yiaddr) {
+    struct tcp_pcb* pcb = web_conn_pcb;
+    if (!pcb) return;
+    if (pcb->remote_ip.addr != yiaddr) return; //別クライアント (2台目) の場合は触らない
+    iotpad_dbg_str("WEB: dhcp cleanup\n");
+    web_conn_pcb = NULL;
+    web_reset_conn_state();
+    tcp_abort(pcb);
+}
+
 static void web_dhcp_reply(const uint8_t* req, int reqlen, int msgtype, uint32_t yiaddr) {
     (void)reqlen;
     uint8_t* t = web_dhcp_tx;
@@ -263,11 +278,13 @@ static void web_dhcp_recv(void* arg, struct udp_pcb* pcb, struct pbuf* p, const 
     if (!mt || !mtlen) return;
     if (mt[0] == 1) { // DISCOVER → OFFER
         uint32_t ip = web_dhcp_assign(req + 28);
+        web_cleanup_stale_conn(ip); //クライアント再接続時: 残留TCP接続を即破棄
         if (ip) web_dhcp_reply(req, len, 2, ip);
     } else if (mt[0] == 3) { // REQUEST → ACK (要求IPが範囲外ならNAK)
         int rlen;
         const uint8_t* r = web_dhcp_opt(req, len, 50, &rlen);
         uint32_t ip = web_dhcp_assign(req + 28);
+        web_cleanup_stale_conn(ip); //クライアント再接続時: 残留TCP接続を即破棄
         if (ip && (!r || rlen != 4
             || (((uint32_t)r[0] << 24 | (uint32_t)r[1] << 16 | (uint32_t)r[2] << 8 | r[3]) == ip))) {
             web_dhcp_reply(req, len, 5, ip);
