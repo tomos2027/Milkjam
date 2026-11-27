@@ -417,22 +417,26 @@ static void web_push_tick(void* arg) {
         iotpad_dbg_str(buf);
     }
     if (!ntsc_active()) return; //VIDEO 0等で映像停止中は転送しない
-    //WS ping (10秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
-    //30秒アイドル監視の誤発動を防ぐ (pongはブラウザが自動返信)
-    if (now - web_last_ping_ms > 10000) {
+    //WS ping (5秒ごと): 画面静止中は差分ゼロで無通信が正常なため、定期的にACKを強制して
+    //アイドル監視の誤発動とクライアント側WiFiのアイドル切断を防ぐ (pongはブラウザが自動返信)
+    if (now - web_last_ping_ms > 5000) {
         web_last_ping_ms = now;
         web_ws_tx(pcb, 0x9, 0);
     }
-    //送信統計フレーム (1秒ごと): [5][送信フレーム数2byte] — クライアントの診断表示 (tx=N) 用。
-    //push tickが動いていれば転送が詰まっていても1秒ごとに届くため、txの増加/停止で
-    //「tick死」「転送詰まり」「クライアント解析問題」をブラウザだけで判別できる
+    //送信統計フレーム (1秒ごと): [5][送信フレーム数2byte][デバイス起動時間2byte] —
+    //クライアントの診断表示 (tx=N up=XXs) 用。push tickが動いていれば転送が詰まっていても
+    //1秒ごとに届くため、tx/upの推移で「tick死」「転送詰まり」「クライアント解析問題」に加え、
+    //upがリセットされたらデバイス再起動 (ウォッチドッグ) であることがブラウザだけで判別できる
     static uint32_t web_stat_ms;
     if (now - web_stat_ms > 1000) {
         web_stat_ms = now;
+        uint32_t upsec = now / 1000; //デバイス起動時間 (秒、16bitで約18時間まで)
         web_wsbuf[4] = 5; //種別=統計
         web_wsbuf[5] = web_tx_count & 0xFF;
         web_wsbuf[6] = (web_tx_count >> 8) & 0xFF;
-        web_ws_tx(pcb, 2, 3);
+        web_wsbuf[7] = upsec & 0xFF;
+        web_wsbuf[8] = (upsec >> 8) & 0xFF;
+        web_ws_tx(pcb, 2, 5);
     }
     // 描画モード (NTSCのvideomodeに追従): 0=単色 (拡大あり) 1=カラー32x24 2=カラー42x27
     int cm = videomode == VMODE_IJCOLOR ? 1 : videomode == VMODE_WIDETEXT ? 2 : 0;
@@ -620,7 +624,7 @@ static const char WEB_PAGE[] =
 "for(var qx=0;qx<8;qx++){var on=CM==0?(rb>>(7-((sx*8+qx)/M|0)))&1:(rb>>(7-qx))&1;"
 "var c=on?f:b;d[o+qx*4]=c[0];d[o+qx*4+1]=c[1];d[o+qx*4+2]=c[2];d[o+qx*4+3]=255}}}"
 "g.putImageData(img,0,0)}"
-"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0,f1=0,m1=0,p1=0,r1=0,ec=0,exm='',txc=-1,stupd=0,t0=0;"
+"var rd=0,rt=0,ot=0,om=0,rx=0,lastsync=0,f1=0,m1=0,p1=0,r1=0,ec=0,exm='',txc=-1,stupd=0,t0=0,up=0;"
 "function conn(){if(!t0)t0=Date.now();st.textContent='connecting...';st.style.color='#a66';"
 "ws=new WebSocket('ws://'+location.host+'/');ws.binaryType='arraybuffer';"
 "ws.onopen=function(){rd=0;ot=Date.now();om=0;st.textContent='connected';st.style.color='#6c6'};"
@@ -632,12 +636,12 @@ static const char WEB_PAGE[] =
 "if(rsz||!V)sz();dr=1}"
 "else if(t==3){p1++;P=[];for(var i=0;i<16;i++)P.push([(b[i+1]>>5&7)*255/7|0,(b[i+1]>>2&7)*255/7|0,(b[i+1]&3)*255/3|0]);dr=1}"
 "else if(t==4){r1++;var n=b[1],p=2;while(n--){var y=b[p++],w=b[p++];V.set(b.subarray(p,p+w),y*W);p+=w;A.set(b.subarray(p,p+w),y*W);p+=w}dr=1}"
-"else if(t==5){txc=b[1]|(b[2]<<8)}"
+"else if(t==5){txc=b[1]|(b[2]<<8);up=b[3]|(b[4]<<8)}"
 "}catch(ex){ec++;exm=ex.message||'err';st.textContent='rx err: '+exm}}}"
 "conn();setInterval(function(){if(dr&&V&&P){dr=0;draw()}"
 "if(ws&&ws.readyState==1){"
 "if(Date.now()-stupd>1000&&!pasting){stupd=Date.now();"
-"st.textContent='connected t='+Math.floor((Date.now()-t0)/1000)+'s rx='+rx+' f='+f1+' m='+m1+' p='+p1+' r='+r1+' e='+ec+(exm?' '+exm:'')+(txc>=0?' tx='+txc:'')}"
+"st.textContent='connected t='+Math.floor((Date.now()-t0)/1000)+'s rx='+rx+' f='+f1+' m='+m1+' p='+p1+' r='+r1+' e='+ec+(exm?' '+exm:'')+(txc>=0?' tx='+txc:'')+(up>0?' up='+up:'')}"
 "var need=(om===0&&Date.now()-ot>2000)||((!V||!P)&&rx>0&&Date.now()-lastsync>2500)"
 "||(r1===0&&Date.now()-ot>3000&&Date.now()-lastsync>2500);"
 "if(need&&Date.now()-lastsync>2500){lastsync=Date.now();st.textContent='resync...';"
