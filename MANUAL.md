@@ -92,20 +92,55 @@ All sensors are optional. Detected at boot; `PW: xxx OK/FAIL` is printed on UART
 
 ## 3. Display output — SWITCH / LCDON / LCDOFF
 
-### Three display modes (`SWITCH`)
+### Four display modes (`SWITCH`)
 
 | Command | Output | Connection | Clock |
 |---|---|---|---|
 | `SWITCH 0` | DVI (HDMI) 720x480p60 (TV-compatible 480p) | GP12-19 (Pico DVI sock) | 270MHz |
 | `SWITCH 1` | NTSC composite | GP3 (75Ω series + 560pF to GND) | 157.5MHz |
 | `SWITCH 2` | TFT LCD ILI9341 (SPI) | GP12-16 (**exclusive with HDMI**) | 270MHz |
+| `SWITCH 3` | **WEB** — NTSC output continues + the same screen in a web browser (keyboard input works) | GP3 + WiFi AP | 157.5MHz |
 
-- `SWITCH` (no argument) — toggles to the next mode (DVI→NTSC→TFT→DVI; blocked modes are skipped)
+- `SWITCH` (no argument) — toggles to the next mode (DVI→NTSC→TFT→WEB→DVI; blocked modes are skipped)
 - `SWITCH 2,1` — rotates the TFT by 180° (`SWITCH 2,0` restores normal orientation)
 - The mode and rotation are **saved to flash** and restored on the next boot
 - In NTSC mode the CPU runs at 157.5MHz, so BASIC executes slower than in the 270MHz modes
 - The TFT uses differential updates; static screens do not touch the SPI bus (monochrome 2-color display, same as DVI)
 - **The TFT shares SPI1 with the SD card**: while SDON (during SD read/write) the display update pauses
+
+### WEB display mode (`SWITCH 3`) — display and input from a browser
+
+The NTSC composite output keeps playing on the TV while the board also becomes a WiFi access point
+and starts a web server. Open `http://192.168.4.1` in a browser to see the **same screen as NTSC**;
+keyboard input from the browser goes straight into BASIC.
+
+```
+SWITCH 3            ... NTSC output continues + AP + web server start
+                      -> two lines are shown on screen:
+                        WEB AP:Milkjam-xxxx
+                        URL http://192.168.4.1
+(join the AP Milkjam-xxxx from the PC/phone WiFi settings; default password 12345678)
+(open http://192.168.4.1 in the browser)
+SWITCH 3 (again)    ... shows the AP name and URL again
+SWITCH 0-2          ... stops the AP + web server; auto-reconnects to the home WiFi if saved
+```
+
+- Screen transfer is WebSocket (20fps, row-diff). Animations during `RUN` stay live; keys typed in the
+  browser act like a USB keyboard (`Enter`/`Backspace`/arrows/`Esc`/`F1-F10`/`Ctrl+X` etc.). `[PASTE]`
+  (or `Ctrl+V`) opens a text box to paste a program line by line; the `[－][＋][FIT]` buttons change the
+  canvas size, `[再接続]`/`[再読み込み]` reconnect the WebSocket / reload the page
+- Supported: `VIDEO 1-4` (monochrome/zoom) and `VIDEO 9`/`VIDEO 10` color (`COLOR`/`PAL`/`ATTR`) —
+  reproduced exactly like NTSC
+- AP settings: `EJ "SETAPSSID"` / `EJ "SETAPPASS"` (flash saved; default SSID `Milkjam-xxxx`, pass `12345678`)
+- **If the connection stalls or drops (PC-side setting)**: Linux WiFi power save and NetworkManager
+  background scanning can pause the traffic for seconds. Disable power save on the PC:
+  ```sh
+  iw dev wlan0 set power_save off   # check the interface name with iw dev
+  ```
+- Only one client can be connected (the **newest browser wins**). Connection status is shown in the
+  status line (`connected t=XXs rx=.. f=.. m=.. p=.. r=.. e=.. tx=.. up=..`)
+- While the AP is active there is no internet: ThingsBoard send / NTP sync pause
+  (`SWITCH 0-2` resumes them). `EJ "APC"` is refused with `AP Mode Active` while the AP runs
 
 ### HDMI/LCD pin exclusivity (`LCDON` / `LCDOFF`)
 
@@ -157,7 +192,7 @@ Programs can be saved to an FAT32 SD card (≤32GB recommended; reformat SDXC as
 
 - **While SDON, I/O commands on the shared pins (IN3/IN4/OUT1/OUT3/OUT4) are blocked** (`IN`/`OUT`/`PWM`/`WS.LED`/`IR.IN`)
 - `SDOFF` releases the card and restores the I/O pins
-- Polling driver: the DVI/NTSC/TFT display stays alive during SD access (TFT pauses updates only, since it shares SPI1)
+- Polling driver: the DVI/NTSC/TFT/WEB display stays alive during SD access (TFT pauses updates only, since it shares SPI1)
 
 ### Commands
 
@@ -188,9 +223,12 @@ Programs can be saved to an FAT32 SD card (≤32GB recommended; reformat SDXC as
 | `EJ "SETPWD","<pass>"` | Save password |
 | `EJ "SETTOKEN","<token>"` | Save ThingsBoard access token |
 | `EJ "SETSSIDHEX"/"SETPWDHEX"/"SETTOKENHEX","<hex>"` | Hex input (for mixed-case/symbols: 2 digits × N bytes) |
-| `EJ "APC"` | Connect (waits up to 15s, shows link state) |
-| `EJ "APD"` | Disconnect |
+| `EJ "APC"` | Connect (waits up to 15s, shows link state). **Refused while the WEB AP runs** |
+| `EJ "APD"` | Disconnect. **While the WEB AP runs: stops the AP → auto-reconnects to the home WiFi** |
 | `EJ "APS"` | Connection state (1/0) |
+| `EJ "SETAPSSID","<ssid>"` | **WEB display mode (SWITCH 3) AP SSID** (default `Milkjam-xxxx`) |
+| `EJ "SETAPPASS","<pass>"` | **WEB display mode AP password** (8-64 chars, default `12345678`) |
+| `EJ "GETAPSSID"` / `EJ "GETAPPASS"` | **Show the WEB display mode AP settings** |
 | `EJ "RECONNECT"` / `EJ "RECONNECT",<min>` | Auto-reconnect interval (0=OFF, minutes) |
 | `EJ "SYNCTIME"` | NTP sync + **write to RTC** (returns current time instantly if already synced) |
 | `EJ "GETTIME"` | RTC time as JST `YYYY-MM-DDTHH:MM:SS` |
@@ -360,6 +398,7 @@ EJ "SENDTB"          -> TB Code:200
 | `EJ xxx` returns `Unknown:xxx` | Check the command name (`EJ "HELP"`). Watch comma separation when omitting quotes |
 | Keyboard not working | Connect the keyboard directly to the Type-C port (some PC USB hubs don't work) |
 | No DS18B20 values | Run `EJ "DS18B20",1` (switches GP27 to OneWire; takes effect after init). Check the 4.7kΩ pull-up |
+| Browser shows nothing / connection stalls | Check `SWITCH 3` (if the status `up=` resets, the device rebooted). Verify the AP (Milkjam-xxxx) connection and `http://192.168.4.1`. Try the `[再接続]` (reconnect) / `[再読み込み]` (reload) buttons. Disable WiFi power save on the PC (`iw dev wlan0 set power_save off`) |
 
 ---
 

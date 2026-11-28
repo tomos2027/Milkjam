@@ -54,7 +54,7 @@ BME280 (温度/湿度/気圧) / BH1750 (照度) / LTR390 (照度2/UV) / VL53L0X 
 
 ### BASIC (IchigoJam_P 4K版ベース)
 - プログラム領域4096バイト、拡張配列変数 [0]-[357]、`IR.IN` / `ENV.IN` 等
-- **NTSCカラー表示** (NTSCモードのみ): `COLOR 前景[,背景]` / `COL` (省略形)、`PAL n,v` (v=RGB332) / `PAL n,r,g,b` / `PAL RESET`、`PAL(n)` 関数、`ATTR x,y,a` / `ATTR(x,y)` 関数 (セル属性: 下位4bit前景/上位4bit背景)
+- **NTSCカラー表示** (NTSC/WEBモード): `COLOR 前景[,背景]` / `COL` (省略形)、`PAL n,v` (v=RGB332) / `PAL n,r,g,b` / `PAL RESET`、`PAL(n)` 関数、`ATTR x,y,a` / `ATTR(x,y)` 関数 (セル属性: 下位4bit前景/上位4bit背景)
   - `VIDEO 9` — 32x24 16色 / `VIDEO 10` — 42x27 16色 (戻すときは `VIDEO 1`)
   - HDMI/TFTモードでは白黒描画のためこれらのコマンドは値の保持のみ (表示に反映されない)
 - **NEC赤外線送信 `IR.OUT`**: `IR.OUT port,data[,repeat]` (data=上位8bitアドレス/下位8bitコマンド)、`IR.OUT port,[n][,repeat]` で `IR.IN` の受信結果を再送。38kHzキャリアはPWM高速モードで生成
@@ -92,7 +92,7 @@ PAD.IN [100]
     - **pico-sdk**: https://github.com/raspberrypi/pico-sdk.git 2.3.1 (コミット `079c6f3`) `git submodule update --init --recursive` でサブモジュールも更新する
     - **pico-extras**: https://github.com/raspberrypi/pico-extras.git master (コミット `52fd7a7`)
     - **PicoDVI**: https://github.com/mlorenzati/PicoDVI.git master (動作確認: コミット `9eca921`)
-- PicoDVIパッチを当てる (PicoDVIフォールバックビルド `-DMILKJAM_USE_HSTX=0` 時のSWITCHコマンドによるDVI/NTSC/TFT切替の安定化に必須。HSTX既定ビルドでは未使用だが当てておいても害はない)
+- PicoDVIパッチを当てる (PicoDVIフォールバックビルド `-DMILKJAM_USE_HSTX=0` 時のSWITCHコマンドによるDVI/NTSC/TFT/WEB切替の安定化に必須。HSTX既定ビルドでは未使用だが当てておいても害はない)
     `PicoDVI`ディレクトリで`patches/picodvi_dvi_stop_race_fix.patch`を適用する
     ```sh
     cd PicoDVI

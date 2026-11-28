@@ -29,12 +29,12 @@ BME280 (temp/humidity/pressure) / BH1750 (lux) / LTR390 (lux2/UV) / VL53L0X (dis
 | `SWITCH 3` | **WEB** — NTSC output continues + the same screen is shown in a web browser via the built-in WiFi AP (with keyboard input) | GP3 + WiFi | 157.5MHz |
 
 - `SWITCH 2,1` rotates the TFT by 180°. The mode and rotation are saved to flash and restored on the next boot
-- **WEB display mode** (`SWITCH 3`): while the NTSC composite output keeps running locally, the board becomes a WiFi access point (default SSID `Milkjam-xxxx` / pass `12345678`, change with `EJ "SETAPSSID"` / `EJ "SETAPPASS"`) and serves `http://192.168.4.1`, which shows the **same screen as NTSC in a web browser** and accepts **keyboard input from the browser** (WebSocket, 20fps row-diff updates — animations during RUN stay live; monochrome/zoom VIDEO 1-4 and color VIDEO 9/10 `COLOR`/`PAL`/`ATTR` are reproduced exactly like NTSC). Switching to `SWITCH 0-2` stops the AP and reconnects to the home WiFi if configured (ThingsBoard/NTP pause while the AP is active — see MANUAL_JA.md chapter 3, Japanese)
+- **WEB display mode** (`SWITCH 3`): while the NTSC composite output keeps running locally, the board becomes a WiFi access point (default SSID `Milkjam-xxxx` / pass `12345678`, change with `EJ "SETAPSSID"` / `EJ "SETAPPASS"`) and serves `http://192.168.4.1`, which shows the **same screen as NTSC in a web browser** and accepts **keyboard input from the browser** (WebSocket, 20fps row-diff updates — animations during RUN stay live; monochrome/zoom VIDEO 1-4 and color VIDEO 9/10 `COLOR`/`PAL`/`ATTR` are reproduced exactly like NTSC). Switching to `SWITCH 0-2` stops the AP and reconnects to the home WiFi if configured (ThingsBoard/NTP pause while the AP is active — see MANUAL.md chapter 3 / MANUAL_JA.md chapter 3)
 - **LCDON / LCDOFF commands** (new): the TFT LCD (GP12-16) shares pins with the HDMI sock (GP12-19), so they are used **exclusively**
   - `LCDON` — enable the LCD and switch to LCD mode. `SWITCH 0` (HDMI) is blocked afterwards (message only)
   - `LCDOFF` — disable the LCD (switches to HDMI if in LCD mode). `SWITCH 2` (LCD) is blocked afterwards
   - NTSC (GP3) is always switchable (not a shared pin). The lock state is saved to flash
-- **WS.LED** (WS2812B): ports 1-7 (OUT1-6 + LED/GP2). **Driven by PIO**, so long LED tapes do not disturb the display or USB keyboard. Blocked on shared pins (ports 1/3/4) while SDON
+- **WS.LED** (WS2812B): ports 0-7 (0=**on-board LED (CYW43)**, 1-6=OUT1-6, 7=LED/GP2). **Driven by PIO**, so long LED tapes do not disturb the display or USB keyboard. Blocked on shared pins (ports 1/3/4) while SDON. `WS.LED 0,n` toggles the Pico 2 W on-board LED (single-color: lit when any of array [0]-[2] is non-zero)
 
 ### SD card (`SDON` / `SDOFF`, slots 200-299)
 - `SDON` — initialize the card (FAT32). I/O commands on the shared pins (IN3/IN4/OUT1/OUT3/OUT4) are blocked
@@ -80,7 +80,7 @@ PAD.IN [100]
     - **pico-sdk**: https://github.com/raspberrypi/pico-sdk.git 2.3.1 (commit `079c6f3`), update submodules with `git submodule update --init --recursive`
     - **pico-extras**: https://github.com/raspberrypi/pico-extras.git master (commit `52fd7a7`)
     - **PicoDVI**: https://github.com/mlorenzati/PicoDVI.git master (tested: commit `9eca921`)
-- Apply the PicoDVI patch (required for stable DVI/NTSC/TFT switching with the SWITCH command)
+- Apply the PicoDVI patch (required for stable DVI/NTSC/TFT/WEB switching with the SWITCH command)
     ```sh
     cd PicoDVI
     git apply ../patches/picodvi_dvi_stop_race_fix.patch
@@ -123,11 +123,8 @@ The 4K edition extensions (4096-byte program area, extended array variables, `IR
 ### SD card driver (`src/sd_card.h`)
 Adapted from [Canon-boy4's GivetakeJam_P](https://github.com/Canon-boy4/ichigojam-firm/tree/rp2350-16130) (rp2350-16130 branch, MIT license), via [IchigoJam-RP2040Zero](../IchigoJam-RP2040Zero).
 
-### NTSC output code (`src/ntsc/`)
-The NTSC composite video output code (`src/ntsc/`) is copyrighted by KenKen.
-- Free to use for non-commercial purposes. When publishing works using it, please mention the usage somewhere (website etc.)
-- Commercial use requires individual judgment (contact via the BBS etc.)
-- Author: [KenKen](http://www.ze.em-net.ne.jp/~kenken/profile/index.html) — Copyright (C) 2024, KenKen, all right reserved.
+### NTSC output code (`src/video/`, `src/ntsc/ntsc_compat.h`)
+The NTSC composite video output library **ntscv** (`src/video/`) is an original clean-room implementation written from public specifications (NTSC / SMPTE 170M) and pico-sdk (BSD-3-Clause) documentation only (the PWM+DMA technique idea is credited to @lovyan03). MIT license, Copyright (c) 2026 the IchigoJam-RP2040Zero authors. See `docs/ntsc_video_spec.md` for the specification.
 
 ### OLED font data (`src/oled_fonts.h`)
 The OLED font data (`src/oled_fonts.h`) is converted from the [U8g2](https://github.com/olikraus/u8g2) library (olikraus, BSD-3-Clause license) fonts using `tools/gen_oled_fonts.py`.

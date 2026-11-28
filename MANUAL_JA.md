@@ -116,9 +116,12 @@ NTSCコンポジット出力はそのままテレビに表示され続け、同�
 
 ```
 SWITCH 3            … NTSC出力継続 + AP起動 + Webサーバー起動
-                      → 画面に「WEB AP:Milkjam-xxxx http://192.168.4.1」と表示
+                      → 画面に2行で表示されます:
+                        WEB AP:Milkjam-xxxx
+                        URL http://192.168.4.1
 (スマホのWiFi設定で Milkjam-xxxx に接続、パスワードは初期値 12345678)
 (ブラウザで http://192.168.4.1 を開く)
+SWITCH 3 (再入力)    … 稼働中でもAP名とURLを再表示します
 SWITCH 0 〜 2       … AP+Webサーバーを停止。保存済みSSIDがあれば家のWiFiへ自動再接続
 ```
 
@@ -149,8 +152,6 @@ SWITCH 0 〜 2       … AP+Webサーバーを停止。保存済みSSIDがあれ
   (`SWITCH 0〜2` に戻すと自動再開)。`EJ "APC"` は「AP Mode Active」と表示されて実行されません
   (APを止めるには `SWITCH 0〜2` に戻すか `EJ "APD"`)
 - AP設定は `EJ "SETAPSSID"` / `EJ "SETAPPASS"` で変更できます (flash保存、次回のAP起動から有効)
-
-### HDMI/LCDピン排他 (`LCDON` / `LCDOFF`)
 
 ### HDMI/LCDピン排他 (`LCDON` / `LCDOFF`)
 
@@ -202,7 +203,7 @@ FAT32形式のSDカード (≤32GB推奨、SDXCはFAT32で再フォーマット)
 
 - **SDON中は共有ピン (IN3/IN4/OUT1/OUT3/OUT4) のI/O命令がブロック**されます (`IN`/`OUT`/`PWM`/`WS.LED`/`IR.IN`)
 - `SDOFF`でSDを解放すると、ピンはI/O状態に戻ります
-- ポーリング方式のためSD読み書き中もDVI/NTSC/TFTの表示は維持されます (TFTはSDとSPI1共用のため更新のみ一時停止)
+- ポーリング方式のためSD読み書き中もDVI/NTSC/TFT/WEBの表示は維持されます (TFTはSDとSPI1共用のため更新のみ一時停止)
 
 ### コマンド
 
@@ -407,6 +408,7 @@ EJ "SENDTB"          → TB Code:200
 | LEDが高速点滅 (約8Hz) | ハードフォルト。UART (`HF core=... pc=... cfsr=...`) のダンプを記録すると原因特定できる |
 | `EJ xxx`が`Unknown:xxx` | コマンド名確認 (`EJ "HELP"`)。引用符なし入力時はカンマ区切りに注意 |
 | キーボードが効かない | Type-Cポート直結のUSBキーボードを使用 (PC経由のUSBハブは不可の場合あり) |
+| ブラウザに画面が出ない / 接続が止まる | `SWITCH 3`を確認 (ステータスの`up=`がリセットされたらデバイス再起動)。AP (Milkjam-xxxx) への接続と`http://192.168.4.1`を確認。`[再接続]`/`[再読み込み]`ボタンを試す。PC側はWiFi省電力を無効化 (`iw dev wlan0 set power_save off`) |
 | DS18B20の値が出ない | `EJ "DS18B20",1` (GP27をOneWireに切替、初期化後に有効)。4.7kΩプルアップを確認 |
 
 ---

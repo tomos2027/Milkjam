@@ -1,6 +1,8 @@
-# ntscv — RP2040 NTSC コンポジット映像出力ライブラリ 仕様書 (参考)
+# ntscv — RP2040/RP2350 NTSC コンポジット映像出力ライブラリ 仕様書
 
-**注意: 現在のファームウェアは `src/ntsc/rp2040_pwm_ntsc_textgraph.c` (phyllosoma / IchigoJam-RP2040Zero オリジナルドライバ) を直接使用しています。本書は過去の `src/video/ntscv*` 実験的ドライバの設計仕様を記した参考文書です。**
+**現在のファームウェアは本ライブラリ ntscv (`src/video/ntscv*.c/h`) を使用しています
+(`src/ntsc/ntsc_compat.h` の薄い互換shim経由で IchigoJam 移植部と接続、RP2040 / RP2350
+(Pico 2 W) の両方で動作)。旧ドライバ `rp2040_pwm_ntsc_textgraph` は使用していません。**
 
 ## 1. 実装方式と法的位置づけ
 
