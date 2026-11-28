@@ -35,6 +35,12 @@
 static struct udp_pcb* web_dhcp_pcb;
 static struct tcp_pcb* web_listen_pcb;
 static struct tcp_pcb* web_conn_pcb;   // 現在の接続 (1クライアント制限)
+//受付済みでactiveの完了を待つ新接続 (ハンドオフ待ち): activeのページ送信を中断させず、
+//完了後に引き継ぐことで「WS受付がページ送信をabort→ブラウザがGET全体を再試行」という
+//接続リトライループ (数十秒の表示遅延) を防ぐ
+static struct tcp_pcb* web_next_pcb;
+static char web_next_rbuf[1024]; //待機中接続のリクエストヘッダ用バッファ
+static int web_next_rlen;
 static uint8_t web_conn_ws;            // 0=HTTP 1=WebSocket確立済み
 static uint8_t web_conn_closing;       // 送信完了後にcloseする
 static bool web_server_running;
@@ -378,6 +384,9 @@ static void web_reset_conn_state() {
     web_client_con = 0;
 }
 
+static void web_promote_next();
+static void web_http_process(struct tcp_pcb* pcb);
+
 static void web_conn_close(struct tcp_pcb* pcb) {
     iotpad_dbg_str("WEB: close\n");
     if (web_conn_pcb == pcb) {
@@ -385,6 +394,95 @@ static void web_conn_close(struct tcp_pcb* pcb) {
     }
     web_reset_conn_state();
     if (tcp_close(pcb) != ERR_OK) tcp_abort(pcb);
+    if (web_next_pcb && web_next_rlen) web_promote_next(); //完了待ちの新接続を引き継ぐ
+}
+
+//大文字小文字を無視してbuf内から文字列を探す (見つかった位置を返す、なければ-1)
+static int web_strifind_buf(const char* buf, const char* needle, int limit) {
+    int nl = strlen(needle);
+    for (int i = 0; i + nl <= limit; i++) {
+        int j = 0;
+        while (j < nl) {
+            char a = buf[i + j];
+            char b = needle[j];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) break;
+            j++;
+        }
+        if (j == nl) return i;
+    }
+    return -1;
+}
+
+//待機中の新接続をactiveへ引き継ぎ、バッファしたリクエストを処理する
+static void web_promote_next() {
+    struct tcp_pcb* pcb = web_next_pcb;
+    if (!pcb) return;
+    web_next_pcb = NULL;
+    if (web_conn_pcb) {
+        struct tcp_pcb* old = web_conn_pcb;
+        web_conn_pcb = NULL;
+        web_reset_conn_state();
+        tcp_abort(old);
+    }
+    web_conn_pcb = pcb;
+    web_reset_conn_state();
+    web_last_ack_ms = to_ms_since_boot(get_absolute_time());
+    memcpy(web_rbuf, web_next_rbuf, web_next_rlen);
+    web_rlen = web_next_rlen;
+    web_next_rlen = 0;
+    web_http_process(pcb);
+}
+
+//待機中接続の受信: リクエストヘッダ到着で引き継ぎを判定する
+static err_t web_next_recv(struct tcp_pcb* pcb, struct pbuf* p) {
+    if (p == NULL) { //相手から切断
+        iotpad_dbg_str("WEB: pending close\n");
+        web_next_pcb = NULL;
+        web_next_rlen = 0;
+        if (tcp_close(pcb) != ERR_OK) tcp_abort(pcb);
+        return ERR_OK;
+    }
+    tcp_recved(pcb, p->tot_len);
+    for (struct pbuf* q = p; q; q = q->next) {
+        if (web_next_rlen + q->len > (int)sizeof web_next_rbuf) {
+            pbuf_free(p);
+            iotpad_dbg_str("WEB: pending drop\n");
+            web_next_pcb = NULL;
+            web_next_rlen = 0;
+            tcp_abort(pcb);
+            return ERR_OK;
+        }
+        memcpy(web_next_rbuf + web_next_rlen, q->payload, q->len);
+        web_next_rlen += q->len;
+    }
+    pbuf_free(p);
+    //ヘッダ終端 (\r\n\r\n) を探す
+    int end = -1;
+    for (int i = 0; i + 3 < web_next_rlen; i++) {
+        if (web_next_rbuf[i] == '\r' && web_next_rbuf[i + 1] == '\n' && web_next_rbuf[i + 2] == '\r' && web_next_rbuf[i + 3] == '\n') {
+            end = i;
+            break;
+        }
+    }
+    if (end < 0) return ERR_OK; //続きを受信待ち
+    //ページGET / WSアップグレードなら引き継ぎ、それ以外 (captive portal検証等) は204で応答して切断
+    if (web_strifind_buf(web_next_rbuf, "get / ", end) >= 0 || web_strifind_buf(web_next_rbuf, "upgrade: websocket", end) >= 0) {
+        if (!web_conn_pcb || web_conn_ws || web_conn_closing) {
+            //active無し/WS入れ替え/ページ送信完了済み → 即引き継ぎ
+            web_promote_next();
+        }
+        //activeがページ送信中 → 送信完了 (close) を待ってweb_conn_closeから引き継ぐ
+        return ERR_OK;
+    }
+    iotpad_dbg_str("WEB: pending 204\n");
+    static const char nf[] = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+    if (tcp_write(pcb, nf, sizeof nf - 1, TCP_WRITE_FLAG_COPY) == ERR_OK) tcp_output(pcb);
+    web_next_pcb = NULL;
+    web_next_rlen = 0;
+    if (tcp_close(pcb) != ERR_OK) tcp_abort(pcb);
+    return ERR_OK;
 }
 
 static err_t web_recv(void* arg, struct tcp_pcb* pcb, struct pbuf* p, err_t err);
@@ -698,22 +796,9 @@ static const char WEB_PAGE[] =
 "</script></body></html>\n";
 #define WEB_PAGE_LEN ((int)(sizeof WEB_PAGE - 1))
 
-//大文字小文字を無視してbuf内から文字列を探す (見つかった位置を返す、なければ-1)
+//大文字小文字を無視してweb_rbuf内から文字列を探す (見つかった位置を返す、なければ-1)
 static int web_strifind(const char* needle, int limit) {
-    int nl = strlen(needle);
-    for (int i = 0; i + nl <= limit; i++) {
-        int j = 0;
-        while (j < nl) {
-            char a = web_rbuf[i + j];
-            char b = needle[j];
-            if (a >= 'A' && a <= 'Z') a += 32;
-            if (b >= 'A' && b <= 'Z') b += 32;
-            if (a != b) break;
-            j++;
-        }
-        if (j == nl) return i;
-    }
-    return -1;
+    return web_strifind_buf(web_rbuf, needle, limit);
 }
 
 //Sec-WebSocket-Keyの値を取り出す (24文字のbase64)
@@ -873,6 +958,7 @@ static void web_ws_parse(struct tcp_pcb* pcb) {
 //===== TCPコールバック =====
 static err_t web_recv(void* arg, struct tcp_pcb* pcb, struct pbuf* p, err_t err) {
     (void)arg;
+    if (pcb == web_next_pcb) return web_next_recv(pcb, p); //ハンドオフ待ちの新接続
     if (pcb != web_conn_pcb) {
         if (p) pbuf_free(p);
         return ERR_OK;
@@ -930,16 +1016,25 @@ static err_t web_sent_cb(void* arg, struct tcp_pcb* pcb, u16_t len) {
 }
 
 static void web_err(void* arg, err_t err) {
-    (void)arg; (void)err;
+    (void)err;
+    struct tcp_pcb* dead = (struct tcp_pcb*)arg;
+    if (dead == web_next_pcb) { //ハンドオフ待ちの新接続がエラー
+        iotpad_dbg_str("WEB: err (next)\n");
+        web_next_pcb = NULL;
+        web_next_rlen = 0;
+        return;
+    }
     iotpad_dbg_str("WEB: err\n");
-    //tcp_errにはpcbが渡されないため、単一接続前提で現在の接続を破棄扱いにする
+    //tcp_errにはpcbが渡されないためtcp_arg(pcb, pcb)で渡したarg (pcb) で識別する
     //(pcbはlwIPが解放済みのためここでは触らない)
     web_conn_pcb = NULL;
     web_reset_conn_state();
+    if (web_next_pcb && web_next_rlen) web_promote_next(); //完了待ちの新接続があれば引き継ぐ
 }
 
 static err_t web_poll(void* arg, struct tcp_pcb* pcb) {
     (void)arg;
+    if (pcb == web_next_pcb) return ERR_OK; //ハンドオフ待ち (activeの完了を待つ)
     if (pcb != web_conn_pcb) return ERR_OK;
     if (web_conn_closing
         || (web_last_ack_ms && to_ms_since_boot(get_absolute_time()) - web_last_ack_ms > WEB_IDLE_TIMEOUT_MS)) {
@@ -947,6 +1042,7 @@ static err_t web_poll(void* arg, struct tcp_pcb* pcb) {
         web_conn_pcb = NULL;
         web_reset_conn_state();
         tcp_abort(pcb);
+        if (web_next_pcb && web_next_rlen) web_promote_next(); //完了待ちの新接続があれば引き継ぐ
         return ERR_ABRT;
     }
     return ERR_OK;
@@ -956,20 +1052,30 @@ static err_t web_accept(void* arg, struct tcp_pcb* pcb, err_t err) {
     (void)arg;
     if (err != ERR_OK || !pcb) return err;
     iotpad_dbg_str("WEB: accept\n");
+    tcp_arg(pcb, pcb); //errコールバックでどの接続のエラーか識別できるようにする
     if (web_conn_pcb) {
-        //既存接続がある場合は中断して新しい接続を優先する (最新接続優先)。
-        //ブラウザの再読み込みでは旧WS接続のFIN処理より先に新しいページGETが届くため、
-        //旧接続を503で拒否すると再読み込み後に画面が表示されなくなる
-        iotpad_dbg_str("WEB: replace\n");
-        struct tcp_pcb* old = web_conn_pcb;
-        web_conn_pcb = NULL;
-        web_reset_conn_state();
-        tcp_abort(old);
+        //activeが既にある: 新接続はpendingで待機する (activeのページ送信をabortしない。
+        //WS受付がページ送信を強制切断するとブラウザがGET全体を再試行し、
+        //リロード/初回接続で数十秒の表示遅延になるため)。
+        //pendingが既にある場合は古いpendingを破棄して新しい方を採用する
+        iotpad_dbg_str("WEB: pending\n");
+        if (web_next_pcb) {
+            struct tcp_pcb* op = web_next_pcb;
+            web_next_pcb = NULL;
+            tcp_abort(op);
+        }
+        web_next_pcb = pcb;
+        web_next_rlen = 0;
+        tcp_recv(pcb, web_recv);
+        tcp_sent(pcb, web_sent_cb);
+        tcp_err(pcb, web_err);
+        tcp_poll(pcb, web_poll, 8);
+        tcp_nagle_disable(pcb);
+        return ERR_OK;
     }
     web_conn_pcb = pcb;
     web_reset_conn_state();
     web_last_ack_ms = to_ms_since_boot(get_absolute_time());
-    tcp_arg(pcb, NULL);
     tcp_recv(pcb, web_recv);
     tcp_sent(pcb, web_sent_cb);
     tcp_err(pcb, web_err);
