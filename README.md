@@ -1,5 +1,7 @@
 # Milkjam
 
+**English** | [日本語](README_JA.md) | [Manual (EN)](MANUAL.md) | [マニュアル (JA)](MANUAL_JA.md)
+
 An **Raspberry Pi Pico 2 W (wireless)** version based on IchigoJam BASIC 1.6.1 (4K edition).
 A BASIC for IoT starter kits that integrates WiFi, sensors, ThingsBoard telemetry, OLED display and SD card storage on a single Pico 2 W.
 

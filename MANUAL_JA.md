@@ -1,5 +1,7 @@
 # Milkjam マニュアル / Manual
 
+[English](README.md) | [日本語](README_JA.md) | [Manual (EN)](MANUAL.md) | **マニュアル (JA)**
+
 Milkjam (IchigoJam BASIC 1.6.1 4K版ベース / Raspberry Pi Pico 2 W) の使用マニュアルです。
 セットアップ方法は [README_JA.md](README_JA.md) を参照してください。
 

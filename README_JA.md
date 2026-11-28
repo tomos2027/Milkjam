@@ -1,5 +1,7 @@
 # Milkjam
 
+[English](README.md) | **日本語** | [Manual (EN)](MANUAL.md) | [マニュアル (JA)](MANUAL_JA.md)
+
 IchigoJam BASIC 1.6.1 (4K版) をベースにした **Raspberry Pi Pico 2 W (RP2350 + CYW43439 WiFi)** 版です。
 WiFi接続・センサー・ThingsBoard送信・OLED表示・SDカードを1枚のPico 2 Wに統合した、IoTスターターキット向けBASICです。
 
