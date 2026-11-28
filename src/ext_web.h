@@ -41,6 +41,7 @@ static struct tcp_pcb* web_conn_pcb;   // 現在の接続 (1クライアント�
 static struct tcp_pcb* web_next_pcb;
 static char web_next_rbuf[1024]; //待機中接続のリクエストヘッダ用バッファ
 static int web_next_rlen;
+static struct tcp_pcb* web_old_pcb; //引き継ぎでgraceful closeした旧接続 (FIN待ち、errは無視)
 static uint8_t web_conn_ws;            // 0=HTTP 1=WebSocket確立済み
 static uint8_t web_conn_closing;       // 送信完了後にcloseする
 static bool web_server_running;
@@ -424,7 +425,18 @@ static void web_promote_next() {
         struct tcp_pcb* old = web_conn_pcb;
         web_conn_pcb = NULL;
         web_reset_conn_state();
-        tcp_abort(old);
+        if (web_conn_closing) {
+            //ページ送信完了済み: graceful closeで未送信データ+FINを配送する。
+            //abort (RST) するとキュー中のページ後半が失われ、ブラウザがドキュメントを
+            //再取得してGET/WSのリトライループ (数十秒の表示遅延) になるため
+            web_old_pcb = old;
+            if (tcp_close(old) != ERR_OK) {
+                tcp_abort(old);
+                web_old_pcb = NULL;
+            }
+        } else {
+            tcp_abort(old); //live WS入れ替え等 (newest wins、キュー中データの喪失は許容)
+        }
     }
     web_conn_pcb = pcb;
     web_reset_conn_state();
@@ -1024,6 +1036,11 @@ static void web_err(void* arg, err_t err) {
         web_next_rlen = 0;
         return;
     }
+    if (dead == web_old_pcb) { //graceful close中の旧接続がエラー (相手消失等) — 新接続には影響しない
+        iotpad_dbg_str("WEB: err (old)\n");
+        web_old_pcb = NULL;
+        return;
+    }
     iotpad_dbg_str("WEB: err\n");
     //tcp_errにはpcbが渡されないためtcp_arg(pcb, pcb)で渡したarg (pcb) で識別する
     //(pcbはlwIPが解放済みのためここでは触らない)
@@ -1053,6 +1070,7 @@ static err_t web_accept(void* arg, struct tcp_pcb* pcb, err_t err) {
     if (err != ERR_OK || !pcb) return err;
     iotpad_dbg_str("WEB: accept\n");
     tcp_arg(pcb, pcb); //errコールバックでどの接続のエラーか識別できるようにする
+    if (web_old_pcb == pcb) web_old_pcb = NULL; //lwIPが旧接続のメモリアドレスを再利用した場合の誤ルーティング防止
     if (web_conn_pcb) {
         //activeが既にある: 新接続はpendingで待機する (activeのページ送信をabortしない。
         //WS受付がページ送信を強制切断するとブラウザがGET全体を再試行し、
