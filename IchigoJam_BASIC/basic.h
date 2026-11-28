@@ -83,6 +83,7 @@ S_INLINE void IJB_lcd(uint mode, int flip); // 1.2b32 (SWITCH n[,flip]: flip=TFT
 S_INLINE int video_next_mode(); // SWITCH (引数なし) のトグル先モード (LCDON/LCDOFF排他を考慮、init.hで定義)
 S_INLINE void IJB_lcdon(); // LCDON: LCD(TFT)モードへ切替+HDMI排他ロック (init.hで定義)
 S_INLINE void IJB_lcdoff(); // LCDOFF: LCD排他ロック解除+HDMI(DVI)モードへ切替 (init.hで定義)
+void iotpad_web_ap_start(); //Web表示モード: AP/Webサーバー開始 (稼働中はAP/URL情報を再表示、ext_web.hで定義)
 #ifndef NO_KBD_COMMAND
 S_INLINE void IJB_kbd(uint mode); // 1.5b1
 #ifdef VERSION15

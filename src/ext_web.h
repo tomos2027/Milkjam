@@ -538,11 +538,15 @@ static void web_push_tick(void* arg) {
             web_ping_fail = 0;
         } else {
             web_ping_fail++;
-            if (web_ping_fail % 5 == 0) {
-                char buf[64];
-                snprintf(buf, sizeof buf, "WEB: ping fail x%d snd=%d ql=%d\n",
-                    web_ping_fail, (int)tcp_sndbuf(pcb), (int)pcb->snd_queuelen);
-                iotpad_dbg_str(buf);
+            if (web_ping_fail >= 2) {
+                //ping連続失敗 (約6秒): クライアント消失と判断して接続を早期破棄する
+                //(死んだクライアントへのキュー蓄積とRST送信 (CYW43ウェッジの引き金) を最小化)
+                iotpad_dbg_str("WEB: ping fail abort\n");
+                web_conn_pcb = NULL;
+                web_reset_conn_state();
+                tcp_abort(pcb);
+                if (web_next_pcb && web_next_rlen) web_promote_next(); //完了待ちの新接続があれば引き継ぐ
+                return;
             }
         }
     }
@@ -1112,8 +1116,28 @@ void iotpad_web_ap_default_ssid(char* buf, int len) {
 
 //Web表示モード用のAP+Webサーバーを起動する (SWITCH 3の実体、起動時とvideo_switch_modeから呼ぶ)
 //メインスレッドからのみ呼ぶこと (CYW43操作を含む)
+//Web表示モードのAP/URL情報を2行で画面に表示する (稼働中のSSIDを使用)
+static void web_ap_info_print() {
+    char ssid[PW_CFG_SSID_LEN + 1];
+    if (iotpad_ap_ssid[0]) {
+        snprintf(ssid, sizeof ssid, "%s", iotpad_ap_ssid);
+    } else {
+        iotpad_web_ap_default_ssid(ssid, sizeof ssid);
+    }
+    char msg[96];
+    snprintf(msg, sizeof msg, "WEB AP:%s\n", ssid);
+    put_str(msg);
+    iotpad_dbg_str(msg);
+    put_str("URL http://192.168.4.1\n");
+    iotpad_dbg_str("URL http://192.168.4.1\n");
+}
+
 void iotpad_web_ap_start() {
-    if (!iotpad_wifi_started || web_server_running) return;
+    if (!iotpad_wifi_started) return;
+    if (web_server_running) {
+        web_ap_info_print(); //稼働中 (SWITCH 3の再入力): 再初期化せずAP/URL情報を再表示
+        return;
+    }
     iotpad_dbg_str("WEB: ap start\n");
     //STAを切断してAP単独へ (LWIP_SINGLE_NETIF=1のためAPとSTAは併用できない)
     if (iotpad_sntp_started) {
@@ -1182,10 +1206,12 @@ void iotpad_web_ap_start() {
     sys_timeout(WEB_PUSH_INTERVAL_MS, web_push_tick, NULL);
     cyw43_arch_lwip_end();
     web_server_running = web_dhcp_pcb != NULL && web_listen_pcb != NULL;
-    char msg[80];
-    snprintf(msg, sizeof msg, "WEB AP:%s http://192.168.4.1\n", ssid);
+    char msg[96];
+    snprintf(msg, sizeof msg, "WEB AP:%s\n", ssid);
     put_str(msg);
     iotpad_dbg_str(msg);
+    put_str("URL http://192.168.4.1\n");
+    iotpad_dbg_str("URL http://192.168.4.1\n");
 }
 
 //WebサーバーとAPを停止し、保存済みSSIDがあれば家のWiFiへ自動再接続する

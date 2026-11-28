@@ -435,6 +435,7 @@ void IJB_lcd(uint mode, int flip) {
     }
     _g.display_mode = mode;
     if ((uint8)mode == video_output_mode) {
+        if (mode == VIDEO_MODE_WEB) iotpad_web_ap_start(); //SWITCH 3再入力: 稼働中ならAP/URL情報を再表示
         return;
     }
     video_switch_mode(mode);//TFTモードへの切替時はtft_startで新しいMADCTL (180°設定) が反映される
